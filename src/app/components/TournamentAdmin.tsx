@@ -11,6 +11,7 @@ import {
   Medal,
   Plus,
   RotateCcw,
+  Save,
   Share2,
   Trash2,
   Trophy,
@@ -2279,16 +2280,101 @@ function TournamentEditPanel({
   const editableMatches = editableMatchesFromDrawSet(category.id, drawSet);
   const bracketPairSlots = firstRoundPairSlots(category);
   const [showBracketEditor, setShowBracketEditor] = useState(false);
+  const [draftScheduleOverrides, setDraftScheduleOverrides] =
+    useState<ManualScheduleMap>({});
+  const [dirtyScheduleKeys, setDirtyScheduleKeys] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const categorySchedulePrefix = `${category.id}::`;
+  const dirtyKeysForCategory = Array.from(dirtyScheduleKeys).filter((key) =>
+    key.startsWith(categorySchedulePrefix),
+  );
+  const pendingScheduleCount = dirtyKeysForCategory.length;
+
+  function savedScheduleValue(scheduleKey: string) {
+    return scheduleToManualOverride(
+      manualScheduleOverrides[scheduleKey]
+        ? manualOverrideToAssignment(manualScheduleOverrides[scheduleKey])
+        : schedule[scheduleKey],
+    );
+  }
+
+  function selectedScheduleValue(scheduleKey: string) {
+    if (dirtyScheduleKeys.has(scheduleKey) && draftScheduleOverrides[scheduleKey]) {
+      return draftScheduleOverrides[scheduleKey];
+    }
+
+    return savedScheduleValue(scheduleKey);
+  }
+
+  function clearDraftSchedulesForCategory() {
+    setDraftScheduleOverrides((current) => {
+      const next = { ...current };
+
+      Object.keys(next).forEach((key) => {
+        if (key.startsWith(categorySchedulePrefix)) delete next[key];
+      });
+
+      return next;
+    });
+    setDirtyScheduleKeys((current) => {
+      const next = new Set(current);
+
+      next.forEach((key) => {
+        if (key.startsWith(categorySchedulePrefix)) next.delete(key);
+      });
+
+      return next;
+    });
+  }
+
+  function savePendingSchedules() {
+    dirtyKeysForCategory.forEach((scheduleKey) => {
+      const draft = draftScheduleOverrides[scheduleKey];
+
+      if (draft) onUpdateManualSchedule(scheduleKey, draft);
+    });
+
+    clearDraftSchedulesForCategory();
+  }
+
+  function recalculateCategorySchedule() {
+    clearDraftSchedulesForCategory();
+    onClearCategorySchedule(category.id);
+  }
+
+  function randomizeBracketWithSchedules() {
+    clearDraftSchedulesForCategory();
+    onRandomizeBracket(category.id);
+  }
+
+  function resetScheduleRow(scheduleKey: string) {
+    if (dirtyScheduleKeys.has(scheduleKey)) {
+      setDraftScheduleOverrides((current) => {
+        const next = { ...current };
+
+        delete next[scheduleKey];
+
+        return next;
+      });
+      setDirtyScheduleKeys((current) => {
+        const next = new Set(current);
+
+        next.delete(scheduleKey);
+
+        return next;
+      });
+      return;
+    }
+
+    onResetManualSchedule(scheduleKey);
+  }
 
   function updateScheduleValue(
     scheduleKey: string,
     next: Partial<ManualScheduleOverride>,
   ) {
-    const current = scheduleToManualOverride(
-      manualScheduleOverrides[scheduleKey]
-        ? manualOverrideToAssignment(manualScheduleOverrides[scheduleKey])
-        : schedule[scheduleKey],
-    );
+    const current = selectedScheduleValue(scheduleKey);
     const nextDay = next.day ?? current.day;
     const dayTimes = timeOptionsForDay(nextDay);
     const nextTime =
@@ -2298,10 +2384,42 @@ function TournamentEditPanel({
           ? current.time
           : dayTimes[0];
 
-    onUpdateManualSchedule(scheduleKey, {
-      court: next.court ?? current.court,
-      day: nextDay,
-      time: nextTime,
+    setDraftScheduleOverrides((currentDrafts) => ({
+      ...currentDrafts,
+      [scheduleKey]: {
+        court: next.court ?? current.court,
+        day: nextDay,
+        time: nextTime,
+      },
+    }));
+    setDirtyScheduleKeys((currentDirty) => {
+      const updated = new Set(currentDirty);
+
+      updated.add(scheduleKey);
+
+      return updated;
+    });
+  }
+
+  function saveScheduleRow(scheduleKey: string) {
+    const draft = draftScheduleOverrides[scheduleKey];
+
+    if (!draft) return;
+
+    onUpdateManualSchedule(scheduleKey, draft);
+    setDraftScheduleOverrides((currentDrafts) => {
+      const updated = { ...currentDrafts };
+
+      delete updated[scheduleKey];
+
+      return updated;
+    });
+    setDirtyScheduleKeys((currentDirty) => {
+      const updated = new Set(currentDirty);
+
+      updated.delete(scheduleKey);
+
+      return updated;
     });
   }
 
@@ -2340,7 +2458,7 @@ function TournamentEditPanel({
           <div className="flex flex-col gap-2 sm:flex-row">
             <button
               className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-[#0f6b4b] px-4 text-sm font-bold text-white transition hover:bg-[#11835b]"
-              onClick={() => onRandomizeBracket(category.id)}
+              onClick={randomizeBracketWithSchedules}
               type="button"
             >
               <RotateCcw className="h-4 w-4" />
@@ -2501,24 +2619,34 @@ function TournamentEditPanel({
             <h3 className="text-sm font-black uppercase tracking-[0.18em] text-black/45">
               Horarios
             </h3>
-            <button
-              className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-black/10 px-3 text-sm font-bold transition hover:border-[#0f6b4b]"
-              onClick={() => onClearCategorySchedule(category.id)}
-              type="button"
-            >
-              <RotateCcw className="h-4 w-4" />
-              Recalcular
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button
+                className="inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-[#0f6b4b] px-3 text-sm font-bold text-white transition hover:bg-[#11835b] disabled:cursor-not-allowed disabled:opacity-40"
+                disabled={!pendingScheduleCount}
+                onClick={savePendingSchedules}
+                type="button"
+              >
+                <Save className="h-4 w-4" />
+                Guardar cambios
+                {pendingScheduleCount ? ` (${pendingScheduleCount})` : ""}
+              </button>
+              <button
+                className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-black/10 px-3 text-sm font-bold transition hover:border-[#0f6b4b]"
+                onClick={recalculateCategorySchedule}
+                type="button"
+              >
+                <RotateCcw className="h-4 w-4" />
+                Recalcular auto
+              </button>
+            </div>
           </div>
 
           <div className="grid max-h-[560px] gap-3 overflow-auto pr-1">
             {editableMatches.map(({ drawName, match, roundName, scheduleKey }) => {
               const currentSchedule = schedule[scheduleKey];
               const manualOverride = manualScheduleOverrides[scheduleKey];
-              const selectedSchedule = manualOverride
-                ? manualOverrideToAssignment(manualOverride)
-                : currentSchedule;
-              const currentValue = scheduleToManualOverride(selectedSchedule);
+              const hasPendingSchedule = dirtyScheduleKeys.has(scheduleKey);
+              const currentValue = selectedScheduleValue(scheduleKey);
               const timeOptions = timeOptionsForDay(currentValue.day);
 
               return (
@@ -2526,6 +2654,8 @@ function TournamentEditPanel({
                   className={`rounded-lg border p-3 ${
                     currentSchedule?.conflict
                       ? "border-amber-300 bg-amber-50"
+                      : hasPendingSchedule
+                        ? "border-[#0f6b4b]/40 bg-[#eff8f4]"
                       : "border-black/10 bg-[#fbfbf8]"
                   }`}
                   key={scheduleKey}
@@ -2541,16 +2671,22 @@ function TournamentEditPanel({
                     </div>
                     <span
                       className={`shrink-0 rounded px-2 py-1 text-xs font-black ${
-                        manualOverride
+                        hasPendingSchedule
+                          ? "bg-[#d8efe6] text-[#0b553b]"
+                          : manualOverride
                           ? "bg-[#fff3d6] text-[#7a5818]"
                           : "bg-[#e8f3ee] text-[#0b553b]"
                       }`}
                     >
-                      {manualOverride ? "Manual" : "Auto"}
+                      {hasPendingSchedule
+                        ? "Pendiente"
+                        : manualOverride
+                          ? "Manual"
+                          : "Auto"}
                     </span>
                   </div>
 
-                  <div className="mt-3 grid grid-cols-[1fr_1fr_84px_auto] gap-2">
+                  <div className="mt-3 grid grid-cols-[1fr_1fr_84px_auto_auto] gap-2">
                     <select
                       className="h-9 rounded-lg border border-black/10 bg-white px-2 text-sm font-bold outline-none focus:border-[#0f6b4b]"
                       onChange={(event) =>
@@ -2600,9 +2736,19 @@ function TournamentEditPanel({
                     </select>
 
                     <button
+                      className="inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-[#0f6b4b] px-3 text-sm font-bold text-white transition hover:bg-[#11835b] disabled:cursor-not-allowed disabled:opacity-35"
+                      disabled={!hasPendingSchedule}
+                      onClick={() => saveScheduleRow(scheduleKey)}
+                      type="button"
+                    >
+                      <Save className="h-4 w-4" />
+                      Guardar
+                    </button>
+
+                    <button
                       className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-black/10 text-black/55 transition hover:border-[#0f6b4b] hover:text-[#0f6b4b] disabled:cursor-not-allowed disabled:opacity-35"
-                      disabled={!manualOverride}
-                      onClick={() => onResetManualSchedule(scheduleKey)}
+                      disabled={!manualOverride && !hasPendingSchedule}
+                      onClick={() => resetScheduleRow(scheduleKey)}
                       type="button"
                     >
                       <RotateCcw className="h-4 w-4" />
