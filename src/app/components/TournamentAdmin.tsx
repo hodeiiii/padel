@@ -5,1282 +5,283 @@ import {
   CalendarClock,
   CheckCircle2,
   Copy,
+  Crown,
   ExternalLink,
   FileSpreadsheet,
+  Globe2,
   LockKeyhole,
-  Medal,
+  LockOpen,
   Plus,
   RotateCcw,
-  Save,
+  Search,
   Share2,
+  Shuffle,
   Trash2,
   Trophy,
   Upload,
   Users,
+  X,
 } from "lucide-react";
 import {
   useEffect,
   useMemo,
-  useRef,
   useState,
   useSyncExternalStore,
-  type ComponentType,
-  type CSSProperties,
-  type ReactNode,
+  type ChangeEvent,
 } from "react";
 import * as XLSX from "xlsx";
+import {
+  adminAuthStorageKey,
+  adminStorageKey,
+  buildDrawSets,
+  buildGlobalSchedule,
+  buildScheduleSummaryRows,
+  clearCategoryManualSchedules,
+  countPairs,
+  countReviewPairs,
+  courtCount,
+  dayOptions,
+  defaultScheduleConfig,
+  defaultExcelPath,
+  emptyAdminState,
+  isPlayableMatch,
+  matchNeedsSchedule,
+  manualOverrideToAssignment,
+  matchScheduleKey,
+  matchTeamsLabel,
+  normalizeScheduleConfig,
+  parseCategoriesFromRows,
+  publicStorageKey,
+  scheduleToManualOverride,
+  shufflePairsKeepingLocks,
+  slugFromName,
+  timeOptionsForDay,
+  type AdminState,
+  type CategoryData,
+  type CategoryDrawSet,
+  type DayKey,
+  type Draw,
+  type ManualPairLockMap,
+  type ManualScheduleMap,
+  type ManualScheduleOverride,
+  type Match,
+  type PairLockMap,
+  type Pair,
+  type PublishedTournament,
+  type RestrictionRule,
+  type RuleMode,
+  type ScheduleAssignment,
+  type ScheduleSummaryRow,
+  type ScheduleWindow,
+  type SelectionByCategory,
+  type SheetCell,
+  type Team,
+  type TournamentScheduleConfig,
+} from "../lib/tournament";
 
-type SheetCell = string | number | boolean | null | undefined;
-
-type Pair = {
-  id: string;
-  seed: number;
-  playerOne: string;
-  playerTwo: string;
-  restriction: string;
-  comment: string;
-  category: string;
-};
-
-type CategoryData = {
-  id: string;
-  name: string;
-  pairs: Pair[];
-  warnings: string[];
-};
-
-type Team = {
-  id: string;
-  seed?: number;
-  name: string;
-  restriction?: string;
-  isPlaceholder?: boolean;
-};
-
-type Match = {
-  id: string;
-  label: string;
-  sideA: Team | null;
-  sideB: Team | null;
-  winner: Team | null;
-  loser: Team | null;
-};
-
-type DayKey = "jueves" | "viernes" | "sabado";
-
-type ScheduleSlot = {
-  day: DayKey;
-  dayLabel: string;
-  time: string;
-  minutes: number;
-  court: number;
-  slotIndex: number;
-};
-
-type ScheduleTimeGroup = {
-  groupIndex: number;
-  slots: ScheduleSlot[];
-};
-
-type ScheduleAssignment = ScheduleSlot & {
-  conflict?: boolean;
-  manual?: boolean;
-};
-
-type ScheduleResult = {
-  assignments: Record<string, ScheduleAssignment>;
-  saturdayCount: number;
-  total: number;
-  conflicts: number;
-};
-
-type Round = {
-  name: string;
-  matches: Match[];
-};
-
-type Draw = {
-  title: string;
-  accent: "main" | "consolation";
-  rounds: Round[];
-};
-
-type CategoryDrawSet = {
-  categoryId: string;
-  mainDraw: Draw;
-  consolationDraw: Draw;
-};
-
-type SelectionMap = Record<string, string>;
-type CategorySelectionMap = Record<string, SelectionMap>;
-type AdminTab = "draws" | "summary";
-
-type ManualScheduleOverride = {
-  day: DayKey;
-  time: string;
-  court: number;
-};
-
-type ManualScheduleMap = Record<string, ManualScheduleOverride>;
-
-type TournamentStateSnapshot = {
-  categories: CategoryData[];
-  selectedCategoryId: string;
-  mainSelectionsByCategory: CategorySelectionMap;
-  consolationSelectionsByCategory: CategorySelectionMap;
-  manualScheduleOverrides: ManualScheduleMap;
-};
-
-type TournamentDraft = TournamentStateSnapshot & {
-  publishedSlug?: string;
-  savedAt: string;
-};
-
-type PublishedTournament = TournamentStateSnapshot & {
-  slug: string;
-  title: string;
-  publishedAt: string;
-  updatedAt: string;
-};
-
-type InitialAdminState = TournamentStateSnapshot & {
-  publishedSlug: string;
-};
-
-const previewLimit = 24;
-const courtCount = 8;
-const bracketMatchHeight = 210;
-const bracketBaseGap = 16;
-const draftStorageKey = "padel-admin-draft-v1";
-const activePublicationStorageKey = "padel-active-publication-v1";
-const adminAuthStorageKey = "padel-admin-auth-v1";
 const adminPassword = "landerlander";
-const dayOrder: Record<DayKey, number> = {
-  jueves: 0,
-  viernes: 1,
-  sabado: 2,
-};
-const emptyMainDraw: Draw = {
-  title: "Cuadro principal",
-  accent: "main",
-  rounds: [],
-};
-const emptyConsolationDraw: Draw = {
-  title: "Consolacion",
-  accent: "consolation",
-  rounds: [],
-};
-const emptyInitialAdminState: InitialAdminState = {
-  categories: [],
-  selectedCategoryId: "",
-  mainSelectionsByCategory: {},
-  consolationSelectionsByCategory: {},
-  manualScheduleOverrides: {},
-  publishedSlug: "",
-};
-const publishedTournamentCache = new Map<
-  string,
-  {
-    raw: string | null;
-    value: PublishedTournament | null;
-  }
->();
+const tabs = [
+  { id: "import", label: "Importar" },
+  { id: "rules", label: "Restricciones" },
+  { id: "draws", label: "Cuadros" },
+  { id: "public", label: "Publico" },
+] as const;
 
-type RoundLayoutStyle = CSSProperties & {
-  "--round-gap": string;
-  "--round-padding": string;
-};
+type AdminTab = (typeof tabs)[number]["id"];
 
-function bracketRoundLayout(roundIndex: number) {
-  const stride = bracketMatchHeight + bracketBaseGap;
-
-  return {
-    gap: `${2 ** roundIndex * stride - bracketMatchHeight}px`,
-    paddingTop: `${((2 ** roundIndex - 1) * stride) / 2}px`,
-  };
-}
-
-function bracketRoundStyle(roundIndex: number): RoundLayoutStyle {
-  const layout = bracketRoundLayout(roundIndex);
-
-  return {
-    "--round-gap": layout.gap,
-    "--round-padding": layout.paddingTop,
-  };
-}
-
-function domSlug(value: string) {
-  return normalizeText(value).replace(/[^a-z0-9]+/g, "-");
-}
-
-function publishedTournamentStorageKey(slug: string) {
-  return `padel-public-tournament-${slug}`;
-}
-
-function firstSurname(fullName: string) {
-  const tokens = fullName.trim().split(/\s+/).filter(Boolean);
-
-  if (tokens.length <= 1) return tokens[0] || "";
-
-  const firstSurnameIndex = 1;
-  const firstSurnameToken = tokens[firstSurnameIndex];
-  const particles = new Set(["de", "del", "da", "dos", "das", "la", "las"]);
-
-  if (
-    particles.has(normalizeText(firstSurnameToken)) &&
-    tokens[firstSurnameIndex + 1]
-  ) {
-    return `${firstSurnameToken} ${tokens[firstSurnameIndex + 1]}`;
-  }
-
-  return firstSurnameToken;
-}
-
-function cleanCell(value: SheetCell) {
-  return String(value ?? "").trim();
-}
-
-function properCaseName(value: string) {
-  return value
-    .trim()
-    .replace(/\s+/g, " ")
-    .split(" ")
-    .map((word) =>
-      word
-        .split("-")
-        .map((segment) => {
-          const lower = segment.toLocaleLowerCase("es-ES");
-
-          return lower
-            ? lower.charAt(0).toLocaleUpperCase("es-ES") + lower.slice(1)
-            : "";
-        })
-        .join("-"),
-    )
-    .join(" ");
-}
-
-function normalizeText(value: string) {
-  return value
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase();
-}
-
-function nextPowerOfTwo(value: number) {
-  let size = 1;
-
-  while (size < value) size *= 2;
-
-  return Math.max(size, 2);
-}
-
-function makeCategoryId(name: string, index: number) {
-  return `${normalizeText(name).replace(/[^a-z0-9]+/g, "-") || "categoria"}-${index}`;
-}
-
-function makeTournamentSlug() {
-  return `torneo-padel-${Date.now().toString(36)}`;
-}
-
-function tournamentTitle(categories: CategoryData[]) {
-  if (categories.length === 1) return categories[0].name;
-
-  return categories.length
-    ? `Torneo de padel (${categories.length} categorias)`
-    : "Torneo de padel";
-}
-
-function readStorageJson<T>(key: string) {
-  if (typeof window === "undefined") return null;
+function safeJsonParse<T>(value: string | null) {
+  if (!value) return null;
 
   try {
-    const raw = window.localStorage.getItem(key);
-
-    return raw ? (JSON.parse(raw) as T) : null;
+    return JSON.parse(value) as T;
   } catch {
     return null;
   }
 }
 
-function writeStorageJson(key: string, value: unknown) {
-  if (typeof window === "undefined") return;
+function readStoredAdminState(): AdminState {
+  if (typeof window === "undefined") return emptyAdminState;
 
-  window.localStorage.setItem(key, JSON.stringify(value));
-}
-
-function removeStorageItem(key: string) {
-  if (typeof window === "undefined") return;
-
-  window.localStorage.removeItem(key);
-}
-
-function withoutCategoryManualSchedules(
-  overrides: ManualScheduleMap,
-  categoryId: string,
-) {
-  return Object.fromEntries(
-    Object.entries(overrides).filter(
-      ([key]) => !key.startsWith(`${categoryId}::`),
-    ),
-  ) as ManualScheduleMap;
-}
-
-function buildTournamentSnapshot({
-  categories,
-  consolationSelectionsByCategory,
-  mainSelectionsByCategory,
-  manualScheduleOverrides,
-  selectedCategoryId,
-}: TournamentStateSnapshot): TournamentStateSnapshot {
-  return {
-    categories,
-    consolationSelectionsByCategory,
-    mainSelectionsByCategory,
-    manualScheduleOverrides,
-    selectedCategoryId,
-  };
-}
-
-function savePublishedTournament(
-  slug: string,
-  snapshot: TournamentStateSnapshot,
-) {
-  const key = publishedTournamentStorageKey(slug);
-  const existing = readStorageJson<PublishedTournament>(key);
-  const now = new Date().toISOString();
-  const tournament: PublishedTournament = {
-    ...snapshot,
-    slug,
-    title: tournamentTitle(snapshot.categories),
-    publishedAt: existing?.publishedAt ?? now,
-    updatedAt: now,
-  };
-
-  writeStorageJson(key, tournament);
-  writeStorageJson(activePublicationStorageKey, slug);
-  publishedTournamentCache.set(slug, {
-    raw: JSON.stringify(tournament),
-    value: tournament,
-  });
-
-  return tournament;
+  return (
+    safeJsonParse<AdminState>(window.localStorage.getItem(adminStorageKey)) ??
+    emptyAdminState
+  );
 }
 
 function readPublishedTournament(slug: string) {
   if (typeof window === "undefined") return null;
 
-  const key = publishedTournamentStorageKey(slug);
-  const raw = window.localStorage.getItem(key);
-  const cached = publishedTournamentCache.get(slug);
-
-  if (cached?.raw === raw) return cached.value;
-
-  try {
-    const value = raw ? (JSON.parse(raw) as PublishedTournament) : null;
-
-    publishedTournamentCache.set(slug, {
-      raw,
-      value,
-    });
-
-    return value;
-  } catch {
-    publishedTournamentCache.set(slug, {
-      raw,
-      value: null,
-    });
-
-    return null;
-  }
+  return safeJsonParse<PublishedTournament>(
+    window.localStorage.getItem(publicStorageKey(slug)),
+  );
 }
 
-function readInitialAdminState(): InitialAdminState {
-  const draft = readStorageJson<TournamentDraft>(draftStorageKey);
-  const publishedSlug =
-    draft?.publishedSlug ||
-    readStorageJson<string>(activePublicationStorageKey) ||
-    "";
+function workbookToCategories(workbook: XLSX.WorkBook) {
+  const sheetName =
+    workbook.SheetNames.find((name) =>
+      name.toLocaleLowerCase("es-ES").includes("categoria"),
+    ) ?? workbook.SheetNames[0];
+  const sheet = workbook.Sheets[sheetName];
+  const rows = XLSX.utils.sheet_to_json<SheetCell[]>(sheet, {
+    defval: "",
+    header: 1,
+  });
 
-  return draft?.categories.length
-    ? {
-        categories: draft.categories,
-        consolationSelectionsByCategory:
-          draft.consolationSelectionsByCategory ?? {},
-        mainSelectionsByCategory: draft.mainSelectionsByCategory ?? {},
-        manualScheduleOverrides: draft.manualScheduleOverrides ?? {},
-        publishedSlug,
-        selectedCategoryId: draft.selectedCategoryId || draft.categories[0].id,
-      }
-    : {
-        ...emptyInitialAdminState,
-        publishedSlug,
-      };
+  return parseCategoriesFromRows(rows);
+}
+
+function subscribeClientReady(callback: () => void) {
+  const timeout = window.setTimeout(callback, 0);
+
+  return () => window.clearTimeout(timeout);
+}
+
+function getClientReadySnapshot() {
+  return true;
+}
+
+function getServerReadySnapshot() {
+  return false;
 }
 
 function useClientReady() {
   return useSyncExternalStore(
-    () => () => undefined,
-    () => true,
-    () => false,
+    subscribeClientReady,
+    getClientReadySnapshot,
+    getServerReadySnapshot,
   );
 }
 
-function subscribeStorageKey(key: string, onStoreChange: () => void) {
-  if (typeof window === "undefined") return () => undefined;
-
-  function handleStorage(event: StorageEvent) {
-    if (event.key === key) onStoreChange();
-  }
-
-  window.addEventListener("storage", handleStorage);
-  const refreshTimer = window.setInterval(onStoreChange, 2000);
-
-  return () => {
-    window.clearInterval(refreshTimer);
-    window.removeEventListener("storage", handleStorage);
-  };
-}
-
-function findCategoryName(cells: string[]) {
-  return cells.find((cell) => normalizeText(cell).includes("categoria")) || "";
-}
-
-function parseCategories(rows: SheetCell[][]) {
-  const categories: CategoryData[] = [];
-  let current: CategoryData | null = null;
-
-  const openCategory = (name: string) => {
-    current = {
-      id: makeCategoryId(name, categories.length + 1),
-      name,
-      pairs: [],
-      warnings: [],
-    };
-    categories.push(current);
-  };
-
-  rows.forEach((row, rowIndex) => {
-    const cells = row.map(cleanCell);
-    const categoryName = findCategoryName(cells);
-
-    if (categoryName) {
-      openCategory(categoryName);
-      return;
-    }
-
-    const playerOne = properCaseName(cells[1] || "");
-    const playerTwo = properCaseName(cells[2] || "");
-
-    if (!playerOne && !playerTwo) return;
-
-    if (!current) openCategory("Categoria unica");
-
-    const activeCategory = current;
-
-    if (!activeCategory) return;
-
-    const seed = Number.parseInt(cells[0], 10);
-    const pair: Pair = {
-      id: `pair-${rowIndex}-${activeCategory.pairs.length + 1}`,
-      seed: Number.isFinite(seed) ? seed : activeCategory.pairs.length + 1,
-      playerOne,
-      playerTwo,
-      restriction: cells[3] || "",
-      comment: cells[4] || "",
-      category: activeCategory.name,
-    };
-
-    if (!pair.playerOne || !pair.playerTwo) {
-      activeCategory.warnings.push(
-        `Fila ${rowIndex + 1}: pareja incompleta en columnas B/C.`,
-      );
-    }
-
-    activeCategory.pairs.push(pair);
-  });
-
-  return categories.filter((category) => category.pairs.length > 0);
-}
-
-function pairName(pair: Pair) {
-  const playerOne = firstSurname(pair.playerOne) || pair.playerOne || "Jugador 1";
-  const playerTwo = firstSurname(pair.playerTwo) || pair.playerTwo || "Jugador 2";
-
-  return `${playerOne} / ${playerTwo}`;
-}
-
-function pairToTeam(pair: Pair): Team {
-  return {
-    id: pair.id,
-    seed: pair.seed,
-    name: pairName(pair),
-    restriction: pair.restriction,
-  };
-}
-
-function isPlayable(team: Team | null) {
-  return Boolean(team && !team.isPlaceholder);
-}
-
-function roundName(roundIndex: number, totalRounds: number) {
-  const remaining = totalRounds - roundIndex;
-
-  if (remaining === 1) return "Final";
-  if (remaining === 2) return "Semifinales";
-  if (remaining === 3) return "Cuartos";
-  if (remaining === 4) return "Octavos";
-
-  return `Ronda ${roundIndex + 1}`;
-}
-
-function buildDraw(
-  title: string,
-  accent: Draw["accent"],
-  teams: Team[],
-  selections: SelectionMap,
-  prefix: string,
-) {
-  if (teams.length < 2) {
-    return { title, accent, rounds: [] };
-  }
-
-  const size = nextPowerOfTwo(teams.length);
-  const totalRounds = Math.log2(size);
-  const slots = Array<Team | null>(size).fill(null);
-
-  teams.forEach((team, index) => {
-    slots[index] = team;
-  });
-
-  let inputs = slots;
-  let matchNumber = 1;
-  const rounds: Round[] = [];
-
-  for (let roundIndex = 0; roundIndex < totalRounds; roundIndex += 1) {
-    const matches: Match[] = [];
-    const nextInputs: (Team | null)[] = [];
-    const matchesInRound = inputs.length / 2;
-
-    for (let index = 0; index < matchesInRound; index += 1) {
-      const sideA = inputs[index * 2] || null;
-      const sideB = inputs[index * 2 + 1] || null;
-      const id = `${prefix}${matchNumber}`;
-      const selectedId = selections[id];
-      const selectedSide =
-        sideA?.id === selectedId ? sideA : sideB?.id === selectedId ? sideB : null;
-      const automaticWinner =
-        isPlayable(sideA) && !sideB
-          ? sideA
-          : isPlayable(sideB) && !sideA
-            ? sideB
-            : null;
-      const winner = selectedSide || automaticWinner;
-      const loser =
-        winner && isPlayable(sideA) && isPlayable(sideB)
-          ? winner.id === sideA?.id
-            ? sideB
-            : sideA
-          : null;
-      const match: Match = {
-        id,
-        label: `${roundName(roundIndex, totalRounds)} ${index + 1}`,
-        sideA,
-        sideB,
-        winner,
-        loser,
-      };
-
-      matches.push(match);
-      nextInputs.push(
-        winner || {
-          id: `winner-${id}`,
-          name: `Ganador ${id}`,
-          isPlaceholder: true,
-        },
-      );
-      matchNumber += 1;
-    }
-
-    rounds.push({
-      name: roundName(roundIndex, totalRounds),
-      matches,
-    });
-    inputs = nextInputs;
-  }
-
-  return { title, accent, rounds };
-}
-
-function consolationTeamsFrom(mainDraw: Draw) {
-  const firstRound = mainDraw.rounds[0]?.matches ?? [];
-
-  return firstRound
-    .filter((match) => isPlayable(match.sideA) && isPlayable(match.sideB))
-    .map(
-      (match) =>
-        match.loser || {
-          id: `loser-${match.id}`,
-          name: `Perdedor ${match.id}`,
-          isPlaceholder: true,
-        },
-    );
-}
-
-function buildDrawSets(
-  categories: CategoryData[],
-  mainSelectionsByCategory: CategorySelectionMap,
-  consolationSelectionsByCategory: CategorySelectionMap,
-) {
-  return categories.map((category) => {
-    const mainDraw = buildDraw(
-      "Cuadro principal",
-      "main",
-      category.pairs.map(pairToTeam),
-      mainSelectionsByCategory[category.id] ?? {},
-      "P",
-    );
-    const consolationDraw = buildDraw(
-      "Consolacion",
-      "consolation",
-      consolationTeamsFrom(mainDraw),
-      consolationSelectionsByCategory[category.id] ?? {},
-      "C",
-    );
-
-    return {
-      categoryId: category.id,
-      mainDraw,
-      consolationDraw,
-    };
-  });
-}
-
-function buildCsvTemplate() {
-  return [
-    ["", "1a CATEGORIA", "", "", ""],
-    [1, "Jugador A", "Jugador B", "jueves y viernes + 18:00", "comentario"],
-    [2, "Jugador C", "Jugador D", "viernes + 17:00", ""],
-    ["", "2a CATEGORIA", "", "", ""],
-    [1, "Jugador E", "Jugador F", "jueves NO", ""],
-  ];
-}
-
-function escapeCsv(value: string | number) {
-  const text = String(value);
-
-  if (/[",\n]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
-
-  return text;
-}
-
-function downloadTemplate() {
-  const rows = buildCsvTemplate()
-    .map((row) => row.map((cell) => escapeCsv(cell)).join(","))
-    .join("\n");
-  const blob = new Blob([rows], { type: "text/csv;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-
-  link.href = url;
-  link.download = "plantilla-padel.csv";
-  link.click();
-  URL.revokeObjectURL(url);
-}
-
-function formatMinutes(minutes: number) {
-  const hours = Math.floor(minutes / 60);
-  const mins = minutes % 60;
-
-  return `${String(hours).padStart(2, "0")}:${String(mins).padStart(2, "0")}`;
-}
-
-function minutesFromTime(time: string) {
-  const [hours, mins] = time.split(":").map((part) => Number.parseInt(part, 10));
-
-  return (Number.isFinite(hours) ? hours : 0) * 60 +
-    (Number.isFinite(mins) ? mins : 0);
-}
-
-function dayLabel(day: DayKey) {
-  if (day === "jueves") return "Jueves";
-  if (day === "viernes") return "Viernes";
-
-  return "Sabado";
-}
-
-function scheduleSlotSignature(schedule: Pick<ScheduleSlot, "court" | "day" | "time">) {
-  return `${schedule.day}-${schedule.time}-${schedule.court}`;
-}
-
-function scheduleToManualOverride(
-  schedule?: ScheduleAssignment,
-): ManualScheduleOverride {
-  return schedule
-    ? {
-        court: schedule.court,
-        day: schedule.day,
-        time: schedule.time,
-      }
-    : {
-        court: 1,
-        day: "sabado",
-        time: "08:30",
-      };
-}
-
-function manualOverrideToAssignment(
-  override: ManualScheduleOverride,
-): ScheduleAssignment {
-  return {
-    court: override.court,
-    day: override.day,
-    dayLabel: dayLabel(override.day),
-    manual: true,
-    minutes: minutesFromTime(override.time),
-    slotIndex: -1,
-    time: override.time,
-  };
-}
-
-function makeSlotsForRange(
-  day: DayKey,
-  dayLabel: string,
-  startMinutes: number,
-  endMinutes: number,
-) {
-  const slots: ScheduleSlot[] = [];
-
-  for (
-    let minutes = startMinutes;
-    minutes + 60 <= endMinutes;
-    minutes += 60
-  ) {
-    for (let court = 1; court <= courtCount; court += 1) {
-      slots.push({
-        court,
-        day,
-        dayLabel,
-        time: formatMinutes(minutes),
-        minutes,
-        slotIndex: -1,
-      });
-    }
-  }
-
-  return slots;
-}
-
-function tournamentSlots() {
-  return [
-    ...makeSlotsForRange("jueves", "Jueves", 10 * 60 + 30, 13 * 60 + 30),
-    ...makeSlotsForRange("jueves", "Jueves", 17 * 60, 22 * 60 + 30),
-    ...makeSlotsForRange("viernes", "Viernes", 10 * 60 + 30, 13 * 60 + 30),
-    ...makeSlotsForRange("viernes", "Viernes", 17 * 60, 22 * 60 + 30),
-    ...makeSlotsForRange("sabado", "Sabado", 8 * 60 + 30, 21 * 60 + 30),
-  ].map((slot, slotIndex) => ({ ...slot, slotIndex }));
-}
-
-function parseRestrictionTime(hourText: string, minuteText?: string, suffix?: string) {
-  let hours = Number.parseInt(hourText, 10);
-  const minutes = Number.parseInt(minuteText || "0", 10);
-  const normalizedSuffix = suffix?.toLowerCase();
-
-  if (normalizedSuffix === "pm" && hours < 12) hours += 12;
-  if (normalizedSuffix === "am" && hours === 12) hours = 0;
-
-  return hours * 60 + minutes;
-}
-
-function mentionedRestrictionDays(text: string) {
-  const days: DayKey[] = [];
-
-  if (text.includes("jueves")) days.push("jueves");
-  if (text.includes("viernes")) days.push("viernes");
-  if (text.includes("sabado")) days.push("sabado");
-
-  return days;
-}
-
-function dayIsDenied(text: string, day: DayKey) {
-  const dayBeforeNo = new RegExp(
-    `${day}\\s+(?:no|ni)(?!\\s+(?:entre|manana|tarde|puede))`,
-  );
-  const deniedBeforeDay = new RegExp(`(?:ni|sin)\\s+${day}`);
-
-  return dayBeforeNo.test(text) || deniedBeforeDay.test(text);
-}
-
-function extractMinimumTimes(text: string) {
-  const times: number[] = [];
-  const plusPattern = /\+\s*(\d{1,2})(?::?(\d{2}))?\s*(am|pm)?/gi;
-  const afterPattern =
-    /(?:a partir de|despues de|desde)\s+(?:las\s+)?(\d{1,2})(?::?(\d{2}))?\s*(am|pm)?/gi;
-
-  for (const match of text.matchAll(plusPattern)) {
-    times.push(parseRestrictionTime(match[1], match[2], match[3]));
-  }
-
-  for (const match of text.matchAll(afterPattern)) {
-    times.push(parseRestrictionTime(match[1], match[2], match[3]));
-  }
-
-  return times;
-}
-
-function extractMaximumTimes(text: string) {
-  const times: number[] = [];
-  const minusPattern = /-\s*(\d{1,2})(?::?(\d{2}))?\s*(am|pm)?/gi;
-  const beforePattern =
-    /(?:antes de|hasta)\s+(?:las\s+)?(\d{1,2})(?::?(\d{2}))?\s*(am|pm)?/gi;
-
-  for (const match of text.matchAll(minusPattern)) {
-    times.push(parseRestrictionTime(match[1], match[2], match[3]));
-  }
-
-  for (const match of text.matchAll(beforePattern)) {
-    times.push(parseRestrictionTime(match[1], match[2], match[3]));
-  }
-
-  return times;
-}
-
-function deniedInterval(text: string) {
-  if (!text.includes("no") && !text.includes("entre")) return null;
-
-  const match = text.match(
-    /entre\s+(?:las\s+)?(\d{1,2})(?::?(\d{2}))?\s*(am|pm)?\s+(?:y|a)\s+(?:las\s+)?(\d{1,2})(?::?(\d{2}))?\s*(am|pm)?/,
-  );
-
-  if (!match) return null;
-
-  return {
-    from: parseRestrictionTime(match[1], match[2], match[3]),
-    to: parseRestrictionTime(match[4], match[5], match[6]),
-  };
-}
-
-function slotMatchesRestriction(restriction: string | undefined, slot: ScheduleSlot) {
-  const text = normalizeText(restriction || "");
-
-  if (!text || text.includes("cualquier hora") || text.includes("a tope")) {
-    return true;
-  }
-
-  const mentionedDays = mentionedRestrictionDays(text);
-  const appliesToSlotDay =
-    mentionedDays.length === 0 || mentionedDays.includes(slot.day);
-
-  if (dayIsDenied(text, slot.day)) return false;
-
-  if (appliesToSlotDay) {
-    const morningDenied =
-      text.includes("manana") &&
-      (text.includes(" no") || text.includes("no ") || text.includes("ni "));
-    const afternoonDenied =
-      text.includes("tarde") &&
-      (text.includes(" no") || text.includes("no ") || text.includes("ni "));
-
-    if (morningDenied && slot.minutes < 14 * 60) return false;
-    if (afternoonDenied && slot.minutes >= 14 * 60) return false;
-
-    const interval = deniedInterval(text);
-    if (
-      interval &&
-      slot.minutes >= interval.from &&
-      slot.minutes < interval.to
-    ) {
-      return false;
-    }
-
-    const minimumTimes = extractMinimumTimes(text);
-    const maximumTimes = extractMaximumTimes(text);
-    const minimum = minimumTimes.length ? Math.min(...minimumTimes) : null;
-    const maximum = maximumTimes.length ? Math.max(...maximumTimes) : null;
-
-    if (minimum !== null && maximum !== null) {
-      return slot.minutes >= minimum || slot.minutes <= maximum;
-    }
-
-    if (minimum !== null && slot.minutes < minimum) return false;
-    if (maximum !== null && slot.minutes > maximum) return false;
-  }
-
-  return true;
-}
-
-function matchNeedsSchedule(match: Match) {
-  return Boolean(match.sideA && match.sideB);
-}
-
-function matchFitsSlot(match: Match, slot: ScheduleSlot) {
-  const restrictions = [match.sideA, match.sideB]
-    .filter((team): team is Team => Boolean(team && !team.isPlaceholder))
-    .map((team) => team.restriction)
-    .filter(Boolean);
-
-  return restrictions.every((restriction) =>
-    slotMatchesRestriction(restriction, slot),
-  );
-}
-
-function chronologicalMatchGroups(mainDraw: Draw, consolationDraw: Draw) {
-  const groups: Match[][] = [];
-
-  for (let index = 0; index < mainDraw.rounds.length; index += 1) {
-    const stageMatches = [
-      ...(mainDraw.rounds[index]?.matches ?? []),
-      ...(index > 0 ? (consolationDraw.rounds[index - 1]?.matches ?? []) : []),
-    ].filter(matchNeedsSchedule);
-
-    if (stageMatches.length) groups.push(stageMatches);
-  }
-
-  for (
-    let index = Math.max(0, mainDraw.rounds.length - 1);
-    index < consolationDraw.rounds.length;
-    index += 1
-  ) {
-    const consolationOnly = (consolationDraw.rounds[index]?.matches ?? []).filter(
-      matchNeedsSchedule,
-    );
-
-    if (consolationOnly.length) {
-      groups.push(consolationOnly);
-    }
-  }
-
-  return groups;
-}
-
-function scheduleTimeGroups(slots: ScheduleSlot[]) {
-  const groups: ScheduleTimeGroup[] = [];
-
-  slots.forEach((slot) => {
-    const current = groups.at(-1);
-
-    if (
-      current &&
-      current.slots[0]?.day === slot.day &&
-      current.slots[0]?.time === slot.time
-    ) {
-      current.slots.push(slot);
-    } else {
-      groups.push({
-        groupIndex: groups.length,
-        slots: [slot],
-      });
-    }
-  });
-
-  return groups;
-}
-
-type SchedulableMatch = {
-  categoryId: string;
-  match: Match;
-};
-
-function matchScheduleKey(categoryId: string, matchId: string) {
-  return `${categoryId}::${matchId}`;
-}
-
-function globalChronologicalMatchGroups(drawSets: CategoryDrawSet[]) {
-  const categoryGroups = drawSets.map((drawSet) => ({
-    categoryId: drawSet.categoryId,
-    groups: chronologicalMatchGroups(drawSet.mainDraw, drawSet.consolationDraw),
-  }));
-  const totalStages = Math.max(
-    0,
-    ...categoryGroups.map((drawSet) => drawSet.groups.length),
-  );
-  const groups: SchedulableMatch[][] = [];
-
-  for (let index = 0; index < totalStages; index += 1) {
-    const stageMatches = categoryGroups.flatMap((drawSet) =>
-      (drawSet.groups[index] ?? []).map((match) => ({
-        categoryId: drawSet.categoryId,
-        match,
-      })),
-    );
-
-    if (stageMatches.length) groups.push(stageMatches);
-  }
-
-  return groups;
-}
-
-function buildGlobalSchedule(
-  drawSets: CategoryDrawSet[],
-  manualScheduleOverrides: ManualScheduleMap = {},
-): ScheduleResult {
-  const groups = globalChronologicalMatchGroups(drawSets);
-  const slots = tournamentSlots();
-  const timeGroups = scheduleTimeGroups(slots);
-  const assignments: Record<string, ScheduleAssignment> = {};
-  const matchesByKey = new Map<string, Match>();
-  const usedSlotIndexes = new Set<number>();
-  let latestGroup = timeGroups.length - 1;
-  let unscheduledConflicts = 0;
-
-  groups.forEach((group) => {
-    group.forEach((item) => {
-      matchesByKey.set(matchScheduleKey(item.categoryId, item.match.id), item.match);
-    });
-  });
-
-  groups
-    .slice()
-    .reverse()
-    .forEach((group) => {
-      let earliestUsedGroup = latestGroup;
-
-      group
-        .slice()
-        .reverse()
-        .forEach((item) => {
-          const compatibleGroupIndex = timeGroups.findLastIndex(
-            (timeGroup) =>
-              timeGroup.groupIndex >= 0 &&
-              timeGroup.groupIndex <= latestGroup &&
-              timeGroup.slots.some(
-                (slot) =>
-                  !usedSlotIndexes.has(slot.slotIndex) &&
-                  matchFitsSlot(item.match, slot),
-              ),
-          );
-          const fallbackGroupIndex =
-            compatibleGroupIndex >= 0
-              ? compatibleGroupIndex
-              : timeGroups.findLastIndex(
-                  (timeGroup) =>
-                    timeGroup.groupIndex >= 0 &&
-                    timeGroup.groupIndex <= latestGroup &&
-                    timeGroup.slots.some(
-                      (slot) => !usedSlotIndexes.has(slot.slotIndex),
-                    ),
-                );
-          const timeGroup =
-            fallbackGroupIndex >= 0 ? timeGroups[fallbackGroupIndex] : null;
-          const compatibleSlot = timeGroup?.slots.find(
-            (slot) =>
-              !usedSlotIndexes.has(slot.slotIndex) &&
-              matchFitsSlot(item.match, slot),
-          );
-          const fallbackSlot =
-            compatibleSlot ||
-            timeGroup?.slots.find(
-              (slot) => !usedSlotIndexes.has(slot.slotIndex),
-            );
-
-          if (!fallbackSlot || !timeGroup) {
-            unscheduledConflicts += 1;
-            return;
-          }
-
-          assignments[matchScheduleKey(item.categoryId, item.match.id)] = {
-            ...fallbackSlot,
-            conflict: !compatibleSlot,
-          };
-
-          usedSlotIndexes.add(fallbackSlot.slotIndex);
-          earliestUsedGroup = Math.min(earliestUsedGroup, timeGroup.groupIndex);
-        });
-
-      latestGroup = earliestUsedGroup - 1;
-    });
-
-  Object.entries(manualScheduleOverrides).forEach(([key, override]) => {
-    if (!matchesByKey.has(key)) return;
-
-    assignments[key] = manualOverrideToAssignment(override);
-  });
-
-  const conflictKeys = new Set<string>();
-  const occupiedSlots = new Map<string, string[]>();
-
-  Object.entries(assignments).forEach(([key, assignment]) => {
-    const match = matchesByKey.get(key);
-    const slotKey = scheduleSlotSignature(assignment);
-    const slotMatches = occupiedSlots.get(slotKey) ?? [];
-
-    slotMatches.push(key);
-    occupiedSlots.set(slotKey, slotMatches);
-
-    if (assignment.conflict || (match && !matchFitsSlot(match, assignment))) {
-      conflictKeys.add(key);
-    }
-  });
-
-  occupiedSlots.forEach((keys) => {
-    if (keys.length <= 1) return;
-
-    keys.forEach((key) => conflictKeys.add(key));
-  });
-
-  conflictKeys.forEach((key) => {
-    assignments[key] = {
-      ...assignments[key],
-      conflict: true,
-    };
-  });
-
-  return {
-    assignments,
-    conflicts: unscheduledConflicts + conflictKeys.size,
-    saturdayCount: Object.values(assignments).filter(
-      (assignment) => assignment.day === "sabado",
-    ).length,
-    total: Object.keys(assignments).length,
-  };
-}
-
-function scheduleLabel(schedule?: ScheduleAssignment) {
-  if (!schedule) return "Sin horario";
-
-  return `${schedule.dayLabel} ${schedule.time} · Pista ${schedule.court}`;
-}
-
-export default function TournamentAdmin() {
-  const isClientReady = useClientReady();
-
-  if (!isClientReady) {
-    return (
-      <main className="min-h-screen bg-[#f5f4ef] text-[#111816]">
-        <div className="mx-auto flex w-full max-w-[1500px] flex-col gap-6 px-4 py-5 sm:px-6 lg:px-8">
-          <AdminHeaderShell />
-          <EmptyState />
-        </div>
-      </main>
-    );
-  }
-
-  return (
-    <AdminPasswordGate>
-      <TournamentAdminClient initialState={readInitialAdminState()} />
-    </AdminPasswordGate>
-  );
-}
-
-function AdminPasswordGate({ children }: { children: ReactNode }) {
+function AdminPasswordGate({ children }: { children: React.ReactNode }) {
+  const clientReady = useClientReady();
   const [password, setPassword] = useState("");
+  const [manualUnlock, setManualUnlock] = useState(false);
   const [error, setError] = useState("");
-  const [isAllowed, setIsAllowed] = useState(
-    () => window.sessionStorage.getItem(adminAuthStorageKey) === "ok",
-  );
+  const storedUnlock =
+    clientReady &&
+    typeof window !== "undefined" &&
+    window.sessionStorage.getItem(adminAuthStorageKey) === "ok";
+  const unlocked = manualUnlock || storedUnlock;
 
-  function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+  function submit(event: React.FormEvent) {
     event.preventDefault();
 
     if (password === adminPassword) {
       window.sessionStorage.setItem(adminAuthStorageKey, "ok");
-      setIsAllowed(true);
+      setManualUnlock(true);
       setError("");
       return;
     }
 
-    setError("Password incorrecta.");
+    setError("Password incorrecta");
   }
 
-  if (isAllowed) return children;
+  if (unlocked) return <>{children}</>;
 
   return (
-    <main className="min-h-screen bg-[#f5f4ef] text-[#111816]">
-      <div className="mx-auto flex min-h-screen w-full max-w-[980px] items-center px-4 py-8 sm:px-6 lg:px-8">
-        <section className="w-full rounded-xl border border-black/10 bg-white p-6 shadow-xl shadow-black/10 sm:p-8">
-          <div className="flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
-            <div>
-              <div className="flex h-14 w-14 items-center justify-center rounded-xl bg-[#07110d] text-[#c59b45]">
-                <LockKeyhole className="h-7 w-7" />
-              </div>
-              <p className="mt-5 text-xs font-bold uppercase tracking-[0.24em] text-[#9b7732]">
-                Panel admin
-              </p>
-              <h1 className="mt-2 text-3xl font-black tracking-normal sm:text-5xl">
-                Acceso privado
-              </h1>
-            </div>
-
-            <form className="w-full max-w-sm" onSubmit={handleSubmit}>
-              <label
-                className="text-xs font-black uppercase tracking-[0.18em] text-black/45"
-                htmlFor="admin-password"
-              >
-                Password
-              </label>
-              <input
-                autoFocus
-                autoComplete="current-password"
-                className="mt-2 h-12 w-full rounded-lg border border-black/10 bg-[#f7f7f3] px-4 text-base font-bold outline-none transition focus:border-[#0f6b4b] focus:bg-white"
-                id="admin-password"
-                onChange={(event) => {
-                  setPassword(event.target.value);
-                  setError("");
-                }}
-                type="password"
-                value={password}
-              />
-              {error ? (
-                <p className="mt-2 text-sm font-bold text-red-700">{error}</p>
-              ) : null}
-              <button
-                className="mt-4 inline-flex h-11 w-full items-center justify-center rounded-lg bg-[#0f6b4b] px-4 text-sm font-bold text-white transition hover:bg-[#11835b]"
-                type="submit"
-              >
-                Entrar
-              </button>
-            </form>
+    <main className="wc-app flex min-h-screen items-center justify-center p-6">
+      <form className="wc-card wc-accent-top w-full max-w-sm p-6" onSubmit={submit}>
+        <div className="mb-5 flex items-center gap-3">
+          <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-[var(--pitch-900)] text-[var(--gold-300)]">
+            <Trophy className="h-6 w-6" />
+          </span>
+          <div>
+            <p className="wc-eyebrow">Padel Cup</p>
+            <h1 className="wc-title text-2xl">Panel de direccion</h1>
           </div>
-        </section>
-      </div>
+        </div>
+        <label className="mb-1.5 block text-xs font-bold uppercase tracking-[0.14em] text-[var(--ink-soft)]">
+          Acceso privado
+        </label>
+        <input
+          className="wc-field h-11 w-full"
+          onChange={(event) => setPassword(event.target.value)}
+          placeholder="Contrasena"
+          type="password"
+          value={password}
+        />
+        {error ? (
+          <p className="mt-2 text-sm font-bold text-[var(--coral-600)]">{error}</p>
+        ) : null}
+        <button className="wc-btn wc-btn-dark mt-4 h-11 w-full" type="submit">
+          <LockKeyhole className="h-4 w-4" />
+          Entrar al panel
+        </button>
+      </form>
     </main>
   );
 }
 
-function TournamentAdminClient({
-  initialState,
-}: {
-  initialState: InitialAdminState;
-}) {
-  const [previewCategories, setPreviewCategories] = useState<CategoryData[]>([]);
-  const [previewCategoryId, setPreviewCategoryId] = useState("");
-  const [categories, setCategories] = useState<CategoryData[]>(
-    () => initialState.categories,
+export default function TournamentAdmin() {
+  return (
+    <AdminPasswordGate>
+      <TournamentAdminClient />
+    </AdminPasswordGate>
   );
-  const [selectedCategoryId, setSelectedCategoryId] = useState(
-    () => initialState.selectedCategoryId,
+}
+
+function TournamentAdminClient() {
+  const [storedState] = useState<AdminState>(() => readStoredAdminState());
+  const [activeTab, setActiveTab] = useState<AdminTab>("import");
+  const [activeCategoryId, setActiveCategoryId] = useState(
+    storedState.activeCategoryId,
+  );
+  const [categories, setCategories] = useState<CategoryData[]>(
+    storedState.categories,
+  );
+  const [previewCategories, setPreviewCategories] = useState<CategoryData[]>(
+    [],
   );
   const [mainSelectionsByCategory, setMainSelectionsByCategory] =
-    useState<CategorySelectionMap>(
-      () => initialState.mainSelectionsByCategory,
-    );
+    useState<SelectionByCategory>(storedState.mainSelectionsByCategory);
   const [consolationSelectionsByCategory, setConsolationSelectionsByCategory] =
-    useState<CategorySelectionMap>(
-      () => initialState.consolationSelectionsByCategory,
-    );
+    useState<SelectionByCategory>(storedState.consolationSelectionsByCategory);
+  const [manualPairLocks, setManualPairLocks] = useState<ManualPairLockMap>(
+    storedState.manualPairLocks ?? {},
+  );
   const [manualScheduleOverrides, setManualScheduleOverrides] =
-    useState<ManualScheduleMap>(() => initialState.manualScheduleOverrides);
+    useState<ManualScheduleMap>(storedState.manualScheduleOverrides ?? {});
+  const [scheduleConfig, setScheduleConfig] = useState<TournamentScheduleConfig>(
+    () =>
+      normalizeScheduleConfig(
+        storedState.scheduleConfig ?? defaultScheduleConfig,
+      ),
+  );
+  const [publishedSlug, setPublishedSlug] = useState(storedState.publishedSlug);
+  const [loadingExcel, setLoadingExcel] = useState(false);
   const [importError, setImportError] = useState("");
-  const [publishedSlug, setPublishedSlug] = useState(
-    () => initialState.publishedSlug,
-  );
-  const [copiedPublicLink, setCopiedPublicLink] = useState(false);
-  const [activeAdminTab, setActiveAdminTab] = useState<AdminTab>("draws");
+  const [copied, setCopied] = useState(false);
 
-  const activePreview = useMemo(
-    () =>
-      previewCategories.find((category) => category.id === previewCategoryId) ||
-      previewCategories[0],
-    [previewCategories, previewCategoryId],
-  );
+  useEffect(() => {
+    if (typeof window === "undefined") return;
 
-  const activeCategory = useMemo(
-    () =>
-      categories.find((category) => category.id === selectedCategoryId) ||
-      categories[0],
-    [categories, selectedCategoryId],
-  );
+    const state: AdminState = {
+      activeCategoryId,
+      categories,
+      consolationSelectionsByCategory,
+      mainSelectionsByCategory,
+      manualPairLocks,
+      manualScheduleOverrides,
+      publishedSlug,
+      scheduleConfig,
+    };
 
+    window.localStorage.setItem(adminStorageKey, JSON.stringify(state));
+  }, [
+    activeCategoryId,
+    categories,
+    consolationSelectionsByCategory,
+    mainSelectionsByCategory,
+    manualPairLocks,
+    manualScheduleOverrides,
+    publishedSlug,
+    scheduleConfig,
+  ]);
+
+  const activeCategory =
+    categories.find((category) => category.id === activeCategoryId) ??
+    categories[0] ??
+    null;
   const drawSets = useMemo(
     () =>
       buildDrawSets(
@@ -1290,121 +291,122 @@ function TournamentAdminClient({
       ),
     [categories, consolationSelectionsByCategory, mainSelectionsByCategory],
   );
-
   const activeDrawSet =
-    drawSets.find((drawSet) => drawSet.categoryId === activeCategory?.id) ||
-    drawSets[0];
-  const mainDraw = activeDrawSet?.mainDraw ?? emptyMainDraw;
-  const consolationDraw = activeDrawSet?.consolationDraw ?? emptyConsolationDraw;
+    drawSets.find((drawSet) => drawSet.categoryId === activeCategory?.id) ??
+    drawSets[0] ??
+    null;
   const schedule = useMemo(
-    () => buildGlobalSchedule(drawSets, manualScheduleOverrides),
-    [drawSets, manualScheduleOverrides],
+    () => buildGlobalSchedule(drawSets, manualScheduleOverrides, scheduleConfig),
+    [drawSets, manualScheduleOverrides, scheduleConfig],
   );
   const summaryRows = useMemo(
     () => buildScheduleSummaryRows(categories, drawSets, schedule.assignments),
     [categories, drawSets, schedule.assignments],
   );
-
-  const firstRoundResolved = useMemo(() => {
-    const matches = mainDraw.rounds[0]?.matches ?? [];
-
-    return matches.filter((match) => match.loser).length;
-  }, [mainDraw]);
-
+  const reviewCount = countReviewPairs(categories);
+  const manualPairLockCount = Object.values(manualPairLocks).reduce(
+    (total, locks) => total + Object.keys(locks).length,
+    0,
+  );
+  const manualScheduleCount = Object.keys(manualScheduleOverrides).length;
+  const totalLockCount = manualPairLockCount + manualScheduleCount;
   const publicPath = publishedSlug ? `/publico/${publishedSlug}` : "";
-  const publicOrigin =
-    typeof window === "undefined" ? "" : window.location.origin;
-  const publicUrl = publicPath ? `${publicOrigin}${publicPath}` : "";
+  const publicUrl =
+    typeof window !== "undefined" && publicPath
+      ? `${window.location.origin}${publicPath}`
+      : publicPath;
 
-  useEffect(() => {
-    if (!categories.length) {
-      removeStorageItem(draftStorageKey);
-      return;
+  async function loadPublicExcel() {
+    setLoadingExcel(true);
+    setImportError("");
+
+    try {
+      const response = await fetch(defaultExcelPath);
+
+      if (!response.ok) throw new Error("No se pudo cargar el Excel de public");
+
+      const buffer = await response.arrayBuffer();
+      const workbook = XLSX.read(buffer, { type: "array" });
+      const parsed = workbookToCategories(workbook);
+
+      if (!parsed.length)
+        throw new Error("No he detectado parejas en el Excel");
+
+      setPreviewCategories(parsed);
+      setActiveTab("import");
+    } catch (error) {
+      setImportError(
+        error instanceof Error ? error.message : "Error cargando Excel",
+      );
+    } finally {
+      setLoadingExcel(false);
     }
+  }
 
-    const snapshot = buildTournamentSnapshot({
-      categories,
-      consolationSelectionsByCategory,
-      mainSelectionsByCategory,
-      manualScheduleOverrides,
-      selectedCategoryId: activeCategory?.id || selectedCategoryId,
-    });
-    const draft: TournamentDraft = {
-      ...snapshot,
-      publishedSlug: publishedSlug || undefined,
-      savedAt: new Date().toISOString(),
-    };
-
-    writeStorageJson(draftStorageKey, draft);
-
-    if (publishedSlug) {
-      savePublishedTournament(publishedSlug, snapshot);
-    }
-  }, [
-    activeCategory?.id,
-    categories,
-    consolationSelectionsByCategory,
-    mainSelectionsByCategory,
-    manualScheduleOverrides,
-    publishedSlug,
-    selectedCategoryId,
-  ]);
-
-  async function handleUpload(event: React.ChangeEvent<HTMLInputElement>) {
+  async function handleUpload(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
-    event.target.value = "";
 
     if (!file) return;
 
+    setLoadingExcel(true);
+    setImportError("");
+
     try {
-      const workbook = XLSX.read(await file.arrayBuffer(), { type: "array" });
-      const firstSheet = workbook.SheetNames[0];
-      const worksheet = firstSheet ? workbook.Sheets[firstSheet] : null;
+      const buffer = await file.arrayBuffer();
+      const workbook = XLSX.read(buffer, { type: "array" });
+      const parsed = workbookToCategories(workbook);
 
-      if (!worksheet) {
-        setImportError("No se ha encontrado ninguna hoja en el archivo.");
-        return;
-      }
-
-      const rows = XLSX.utils.sheet_to_json<SheetCell[]>(worksheet, {
-        header: 1,
-        defval: "",
-      }) as SheetCell[][];
-      const parsed = parseCategories(rows);
-
-      if (!parsed.length) {
-        setImportError("No se han encontrado parejas en columnas B y C.");
-        return;
-      }
+      if (!parsed.length)
+        throw new Error("No he detectado parejas en el Excel");
 
       setPreviewCategories(parsed);
-      setPreviewCategoryId(parsed[0].id);
-      setImportError("");
-    } catch {
-      setImportError("No se ha podido leer el Excel.");
+      setActiveTab("import");
+    } catch (error) {
+      setImportError(
+        error instanceof Error ? error.message : "Error cargando Excel",
+      );
+    } finally {
+      setLoadingExcel(false);
+      event.target.value = "";
     }
   }
 
-  function validatePreview() {
-    if (!previewCategories.length) return;
-
+  function applyPreview() {
     setCategories(previewCategories);
-    setSelectedCategoryId(activePreview?.id || previewCategories[0].id);
-    setPreviewCategories([]);
-    setPreviewCategoryId("");
+    setActiveCategoryId(previewCategories[0]?.id ?? "");
     setMainSelectionsByCategory({});
     setConsolationSelectionsByCategory({});
+    setManualPairLocks({});
     setManualScheduleOverrides({});
-  }
-
-  function selectCategory(id: string) {
-    setSelectedCategoryId(id);
+    setPublishedSlug("");
+    setPreviewCategories([]);
+    setActiveTab("rules");
   }
 
   function updatePair(
     categoryId: string,
     pairId: string,
-    patch: Partial<Pick<Pair, "comment" | "playerOne" | "playerTwo" | "restriction" | "seed">>,
+    patch: Partial<Pair>,
+  ) {
+    setCategories((current) =>
+      current.map((category) =>
+        category.id === categoryId
+          ? {
+              ...category,
+              pairs: category.pairs.map((pair) =>
+                pair.id === pairId ? { ...pair, ...patch } : pair,
+              ),
+            }
+          : category,
+      ),
+    );
+  }
+
+  function updateRule(
+    categoryId: string,
+    pairId: string,
+    ruleId: string,
+    patch: Partial<RestrictionRule>,
   ) {
     setCategories((current) =>
       current.map((category) =>
@@ -1415,7 +417,9 @@ function TournamentAdminClient({
                 pair.id === pairId
                   ? {
                       ...pair,
-                      ...patch,
+                      rules: pair.rules.map((rule) =>
+                        rule.id === ruleId ? { ...rule, ...patch } : rule,
+                      ),
                     }
                   : pair,
               ),
@@ -1423,6 +427,81 @@ function TournamentAdminClient({
           : category,
       ),
     );
+  }
+
+  function addRule(categoryId: string, pairId: string) {
+    updatePair(categoryId, pairId, {
+      rules: [
+        ...(categories
+          .find((category) => category.id === categoryId)
+          ?.pairs.find((pair) => pair.id === pairId)?.rules ?? []),
+        {
+          confidence: 100,
+          day: "sabado",
+          from: "08:30",
+          id: `manual-rule-${Date.now().toString(36)}`,
+          mode: "available",
+          source: "manual",
+          to: "21:30",
+        },
+      ],
+    });
+  }
+
+  function removeRule(categoryId: string, pairId: string, ruleId: string) {
+    const pair = categories
+      .find((category) => category.id === categoryId)
+      ?.pairs.find((item) => item.id === pairId);
+
+    if (!pair) return;
+
+    updatePair(categoryId, pairId, {
+      rules: pair.rules.filter((rule) => rule.id !== ruleId),
+    });
+  }
+
+  function movePairInBracket(
+    categoryId: string,
+    slotIndex: number,
+    pairId: string,
+  ) {
+    const categoryLocks = manualPairLocks[categoryId] ?? {};
+    const lockedSlots = new Set(
+      Object.keys(categoryLocks).map((slot) => Number.parseInt(slot, 10)),
+    );
+    const lockedPairs = new Set(Object.values(categoryLocks));
+
+    if (lockedSlots.has(slotIndex) || lockedPairs.has(pairId)) return;
+
+    setCategories((current) =>
+      current.map((category) => {
+        if (category.id !== categoryId) return category;
+
+        const selectedIndex = category.pairs.findIndex(
+          (pair) => pair.id === pairId,
+        );
+
+        if (
+          selectedIndex < 0 ||
+          selectedIndex === slotIndex ||
+          lockedSlots.has(selectedIndex)
+        ) {
+          return category;
+        }
+
+        const pairs = [...category.pairs];
+        const selected = pairs[selectedIndex];
+
+        pairs[selectedIndex] = pairs[slotIndex];
+        pairs[slotIndex] = selected;
+
+        return {
+          ...category,
+          pairs: pairs.map((pair, index) => ({ ...pair, seed: index + 1 })),
+        };
+      }),
+    );
+    clearCategoryResults(categoryId);
   }
 
   function clearCategoryResults(categoryId: string) {
@@ -1436,139 +515,115 @@ function TournamentAdminClient({
     }));
   }
 
-  function clearCategoryScheduleOverrides(categoryId: string) {
+  function clearCategorySchedule(categoryId: string) {
     setManualScheduleOverrides((current) =>
-      withoutCategoryManualSchedules(current, categoryId),
+      clearCategoryManualSchedules(current, categoryId),
     );
   }
 
-  function randomizeCategoryBracket(categoryId: string) {
-    const automaticOverrides = withoutCategoryManualSchedules(
-      manualScheduleOverrides,
-      categoryId,
-    );
-    const clearedMainSelections = {
-      ...mainSelectionsByCategory,
-      [categoryId]: {},
-    };
-    const clearedConsolationSelections = {
-      ...consolationSelectionsByCategory,
-      [categoryId]: {},
-    };
+  function toggleMatchupLock(categoryId: string, slotIndexes: number[]) {
+    const category = categories.find((item) => item.id === categoryId);
+
+    if (!category || !slotIndexes.length) return;
+
+    setManualPairLocks((current) => {
+      const currentLocks = current[categoryId] ?? {};
+      const allLocked = slotIndexes.every((slotIndex) =>
+        Boolean(currentLocks[String(slotIndex)]),
+      );
+      const nextCategoryLocks = { ...currentLocks };
+
+      if (allLocked) {
+        slotIndexes.forEach((slotIndex) => {
+          delete nextCategoryLocks[String(slotIndex)];
+        });
+      } else {
+        slotIndexes.forEach((slotIndex) => {
+          const pair = category.pairs[slotIndex];
+
+          if (pair) nextCategoryLocks[String(slotIndex)] = pair.id;
+        });
+      }
+
+      const next = { ...current };
+
+      if (Object.keys(nextCategoryLocks).length) {
+        next[categoryId] = nextCategoryLocks;
+      } else {
+        delete next[categoryId];
+      }
+
+      return next;
+    });
+  }
+
+  function recalculateKeepingManual() {
+    setManualScheduleOverrides((current) => ({ ...current }));
+  }
+
+  function refreshCategoryDraws(categoryId: string) {
+    clearCategoryResults(categoryId);
+    setActiveCategoryId(categoryId);
+    setActiveTab("draws");
+  }
+
+  function randomizeCategory(categoryId: string) {
+    const lockedPairs = manualPairLocks[categoryId] ?? {};
 
     setCategories((current) => {
-      const targetCategory = current.find((category) => category.id === categoryId);
+      const target = current.find((category) => category.id === categoryId);
 
-      if (!targetCategory || targetCategory.pairs.length < 2) return current;
+      if (!target) return current;
 
       let bestCategories = current;
       let bestScore = Number.POSITIVE_INFINITY;
 
       for (let attempt = 0; attempt < 120; attempt += 1) {
-        const shuffledPairs = shufflePairs(targetCategory.pairs);
-        const candidateCategories = current.map((category) =>
+        const shuffled = shufflePairsKeepingLocks(target.pairs, lockedPairs);
+        const candidate = current.map((category) =>
           category.id === categoryId
-            ? {
-                ...category,
-                pairs: shuffledPairs,
-              }
+            ? { ...category, pairs: shuffled }
             : category,
         );
         const candidateDrawSets = buildDrawSets(
-          candidateCategories,
-          clearedMainSelections,
-          clearedConsolationSelections,
+          candidate,
+          { ...mainSelectionsByCategory, [categoryId]: {} },
+          { ...consolationSelectionsByCategory, [categoryId]: {} },
         );
         const candidateSchedule = buildGlobalSchedule(
           candidateDrawSets,
-          automaticOverrides,
+          manualScheduleOverrides,
+          scheduleConfig,
         );
         const score =
           candidateSchedule.conflicts * 1000 - candidateSchedule.saturdayCount;
 
         if (score < bestScore) {
           bestScore = score;
-          bestCategories = candidateCategories;
+          bestCategories = candidate;
         }
       }
 
       return bestCategories;
     });
     clearCategoryResults(categoryId);
-    setManualScheduleOverrides(automaticOverrides);
   }
 
-  function addPair(categoryId: string) {
-    setCategories((current) =>
-      current.map((category) => {
-        if (category.id !== categoryId) return category;
+  function selectWinner(categoryId: string, match: Match, team: Team) {
+    if (!isPlayableMatch(match)) return;
 
-        const nextSeed = category.pairs.length + 1;
+    const update =
+      match.draw === "main"
+        ? setMainSelectionsByCategory
+        : setConsolationSelectionsByCategory;
 
-        return {
-          ...category,
-          pairs: [
-            ...category.pairs,
-            {
-              category: category.name,
-              comment: "",
-              id: `pair-manual-${categoryId}-${Date.now().toString(36)}`,
-              playerOne: `Jugador ${nextSeed}A`,
-              playerTwo: `Jugador ${nextSeed}B`,
-              restriction: "",
-              seed: nextSeed,
-            },
-          ],
-        };
-      }),
-    );
-    clearCategoryResults(categoryId);
-    clearCategoryScheduleOverrides(categoryId);
-  }
-
-  function removePair(categoryId: string, pairId: string) {
-    setCategories((current) =>
-      current.map((category) =>
-        category.id === categoryId
-          ? {
-              ...category,
-              pairs: category.pairs
-                .filter((pair) => pair.id !== pairId)
-                .map((pair, index) => ({
-                  ...pair,
-                  seed: index + 1,
-                })),
-            }
-          : category,
-      ),
-    );
-    clearCategoryResults(categoryId);
-    clearCategoryScheduleOverrides(categoryId);
-  }
-
-  function movePairInBracket(categoryId: string, slotIndex: number, pairId: string) {
-    setCategories((current) =>
-      current.map((category) => {
-        if (category.id !== categoryId) return category;
-
-        const selectedIndex = category.pairs.findIndex((pair) => pair.id === pairId);
-
-        if (selectedIndex < 0 || selectedIndex === slotIndex) return category;
-
-        const nextPairs = [...category.pairs];
-        const selectedPair = nextPairs[selectedIndex];
-        const currentPair = nextPairs[slotIndex];
-
-        nextPairs[slotIndex] = selectedPair;
-        nextPairs[selectedIndex] = currentPair;
-
-        return {
-          ...category,
-          pairs: nextPairs,
-        };
-      }),
-    );
-    clearCategoryResults(categoryId);
+    update((current) => ({
+      ...current,
+      [categoryId]: {
+        ...(current[categoryId] ?? {}),
+        [match.id]: team.id,
+      },
+    }));
   }
 
   function updateManualSchedule(
@@ -1591,645 +646,298 @@ function TournamentAdminClient({
     });
   }
 
-  function selectMainWinner(match: Match, team: Team) {
-    const categoryId = activeCategory?.id;
-
-    if (!categoryId) return;
-    if (!isPlayable(match.sideA) || !isPlayable(match.sideB)) return;
-
-    setMainSelectionsByCategory((current) => ({
-      ...current,
-      [categoryId]: {
-        ...(current[categoryId] ?? {}),
-        [match.id]: team.id,
-      },
-    }));
-    setConsolationSelectionsByCategory((current) => ({
-      ...current,
-      [categoryId]: {},
-    }));
-  }
-
-  function selectConsolationWinner(match: Match, team: Team) {
-    const categoryId = activeCategory?.id;
-
-    if (!categoryId) return;
-    if (!isPlayable(match.sideA) || !isPlayable(match.sideB)) return;
-
-    setConsolationSelectionsByCategory((current) => ({
-      ...current,
-      [categoryId]: {
-        ...(current[categoryId] ?? {}),
-        [match.id]: team.id,
-      },
-    }));
-  }
-
   function publishTournament() {
-    if (!categories.length) return;
-
-    const slug = publishedSlug || makeTournamentSlug();
-    const snapshot = buildTournamentSnapshot({
+    const slug = publishedSlug || slugFromName("torneo padel");
+    const tournament: PublishedTournament = {
       categories,
       consolationSelectionsByCategory,
       mainSelectionsByCategory,
       manualScheduleOverrides,
-      selectedCategoryId: activeCategory?.id || selectedCategoryId,
-    });
+      name: "Torneo de padel",
+      publishedAt: new Date().toISOString(),
+      scheduleConfig,
+      slug,
+    };
 
-    savePublishedTournament(slug, snapshot);
+    window.localStorage.setItem(
+      publicStorageKey(slug),
+      JSON.stringify(tournament),
+    );
     setPublishedSlug(slug);
-    setCopiedPublicLink(false);
   }
 
   async function copyPublicLink() {
     if (!publicUrl) return;
 
     await navigator.clipboard.writeText(publicUrl);
-    setCopiedPublicLink(true);
-  }
-
-  function resetAll() {
-    setPreviewCategories([]);
-    setPreviewCategoryId("");
-    setCategories([]);
-    setSelectedCategoryId("");
-    setMainSelectionsByCategory({});
-    setConsolationSelectionsByCategory({});
-    setManualScheduleOverrides({});
-    setImportError("");
-    setPublishedSlug("");
-    setCopiedPublicLink(false);
-    removeStorageItem(draftStorageKey);
-    removeStorageItem(activePublicationStorageKey);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1600);
   }
 
   return (
-    <main className="min-h-screen bg-[#f5f4ef] text-[#111816]">
-      <div className="mx-auto flex w-full max-w-[1500px] flex-col gap-6 px-4 py-5 sm:px-6 lg:px-8">
-        <header className="rounded-xl bg-[#07110d] p-5 text-white shadow-xl shadow-black/10 sm:p-7">
-          <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+    <main className="wc-app min-h-screen text-[var(--ink)]">
+      <header className="wc-hero-bar">
+        <div className="wc-bar">
+          <div className="flex items-center gap-3 sm:gap-4">
+            <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-white/10 text-[var(--gold-300)] ring-1 ring-white/15">
+              <Trophy className="h-6 w-6" />
+            </span>
             <div>
-              <p className="text-xs font-bold uppercase tracking-[0.24em] text-[#c59b45]">
-                Padel bracket
+              <p className="font-display text-[0.68rem] font-semibold uppercase tracking-[0.3em] text-[var(--gold-300)]">
+                Direccion de torneo
               </p>
-              <h1 className="mt-2 text-3xl font-black tracking-normal sm:text-5xl">
-                Cuadros del torneo
+              <h1 className="font-display text-3xl font-bold uppercase leading-none sm:text-4xl">
+                Padel Cup
               </h1>
             </div>
-
-            <div className="grid grid-cols-2 gap-3 sm:flex">
-              <label className="inline-flex h-11 cursor-pointer items-center justify-center gap-2 rounded-lg bg-[#c59b45] px-4 text-sm font-bold text-black transition hover:bg-[#e0bd68]">
-                <Upload className="h-4 w-4" />
-                Subir Excel
-                <input
-                  accept=".xlsx,.xls,.csv"
-                  className="hidden"
-                  onChange={handleUpload}
-                  type="file"
-                />
-              </label>
-              <button
-                className="inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-[#0f6b4b] px-4 text-sm font-bold text-white transition hover:bg-[#11835b] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-white/40"
-                disabled={!categories.length}
-                onClick={publishTournament}
-                type="button"
-              >
-                <Share2 className="h-4 w-4" />
-                {publishedSlug ? "Actualizar publico" : "Publicar"}
-              </button>
-              {publishedSlug ? (
-                <a
-                  className="inline-flex h-11 items-center justify-center gap-2 rounded-lg border border-white/20 px-4 text-sm font-bold text-white transition hover:border-[#c59b45] hover:text-[#f2d081]"
-                  href={publicPath}
-                  rel="noreferrer"
-                  target="_blank"
-                >
-                  <ExternalLink className="h-4 w-4" />
-                  Ver publico
-                </a>
-              ) : null}
-              <button
-                className="inline-flex h-11 items-center justify-center gap-2 rounded-lg border border-white/20 px-4 text-sm font-bold text-white transition hover:border-[#c59b45] hover:text-[#f2d081]"
-                onClick={downloadTemplate}
-                type="button"
-              >
-                <FileSpreadsheet className="h-4 w-4" />
-                Plantilla
-              </button>
-              <button
-                className="inline-flex h-11 items-center justify-center gap-2 rounded-lg border border-white/20 px-4 text-sm font-bold text-white transition hover:border-[#c59b45] hover:text-[#f2d081]"
-                onClick={resetAll}
-                type="button"
-              >
-                <RotateCcw className="h-4 w-4" />
-                Limpiar
-              </button>
-            </div>
           </div>
-        </header>
+          <div className="flex flex-wrap gap-2">
+            <button
+              className="wc-btn wc-btn-gold"
+              disabled={loadingExcel}
+              onClick={loadPublicExcel}
+              type="button"
+            >
+              <FileSpreadsheet className="h-4 w-4" />
+              Excel de ejemplo
+            </button>
+            <label className="wc-btn wc-btn-on-dark cursor-pointer">
+              <Upload className="h-4 w-4" />
+              Subir Excel
+              <input
+                accept=".xlsx,.xls,.csv"
+                className="hidden"
+                onChange={handleUpload}
+                type="file"
+              />
+            </label>
+          </div>
+        </div>
+      </header>
+      <div className="wc-container">
 
         {importError ? (
           <Notice
             icon={AlertTriangle}
             tone="warning"
-            title="Excel no valido"
+            title="No se pudo importar"
             text={importError}
           />
         ) : null}
 
         {previewCategories.length ? (
           <PreviewPanel
-            activeCategory={activePreview}
             categories={previewCategories}
             onCancel={() => setPreviewCategories([])}
-            onSelect={setPreviewCategoryId}
-            onValidate={validatePreview}
-            selectedId={previewCategoryId}
+            onValidate={applyPreview}
           />
         ) : null}
 
         {categories.length ? (
-          <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <StatCard
-              icon={Users}
-              label="Categorias"
-              value={categories.length}
-            />
-            <StatCard
-              icon={Trophy}
-              label="Parejas"
-              value={activeCategory?.pairs.length ?? 0}
-            />
-            <StatCard
-              icon={Medal}
-              label="En consolacion"
-              value={firstRoundResolved}
-            />
-            <StatCard
-              icon={CalendarClock}
-              label="Sabado total"
-              value={`${schedule.saturdayCount}/${schedule.total}`}
-            />
-          </section>
-        ) : null}
-
-        {categories.length ? (
-          <PublishPanel
-            copied={copiedPublicLink}
-            onCopy={copyPublicLink}
-            onPublish={publishTournament}
-            publicPath={publicPath}
-            publicUrl={publicUrl}
-            published={Boolean(publishedSlug)}
-          />
-        ) : null}
-
-        {categories.length ? (
-          <AdminViewTabs activeTab={activeAdminTab} onChange={setActiveAdminTab} />
-        ) : null}
-
-        {categories.length && activeAdminTab === "summary" ? (
-          <ScheduleSummaryPanel rows={summaryRows} />
-        ) : null}
-
-        {categories.length && activeAdminTab === "draws" ? (
           <>
-            <section className="rounded-xl border border-black/10 bg-white p-4 shadow-sm">
-              <div className="flex flex-wrap gap-2">
-                {categories.map((category) => (
-                  <button
-                    className={`rounded-lg border px-3 py-2 text-sm font-bold transition ${
-                      category.id === activeCategory?.id
-                        ? "border-[#0f6b4b] bg-[#0f6b4b] text-white"
-                        : "border-black/10 bg-[#f7f7f3] text-[#111816] hover:border-[#0f6b4b]"
-                    }`}
-                    key={category.id}
-                    onClick={() => selectCategory(category.id)}
-                    type="button"
-                  >
-                    {category.name}
-                    <span className="ml-2 text-xs opacity-70">
-                      {category.pairs.length}
-                    </span>
-                  </button>
-                ))}
-              </div>
+            <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+              <StatCard
+                icon={Trophy}
+                label="Categorias"
+                value={categories.length}
+              />
+              <StatCard
+                icon={Users}
+                label="Parejas"
+                value={countPairs(categories)}
+              />
+              <StatCard
+                icon={AlertTriangle}
+                label="A revisar"
+                value={reviewCount}
+              />
+              <StatCard
+                icon={CalendarClock}
+                label="Sabado"
+                value={`${schedule.saturdayCount}/${schedule.total}`}
+              />
+              <StatCard
+                icon={LockKeyhole}
+                label="Candados"
+                value={totalLockCount}
+              />
             </section>
 
-            {activeCategory ? (
-              <TournamentEditPanel
+            <AdminTabs
+              activeTab={activeTab}
+              categoriesCount={categories.length}
+              lockCount={totalLockCount}
+              onChange={setActiveTab}
+              reviewCount={reviewCount}
+              scheduleTotal={schedule.total}
+            />
+
+            {activeTab !== "import" && activeTab !== "public" ? (
+              <CategoryTabs
+                activeCategoryId={activeCategory?.id ?? ""}
+                categories={categories}
+                onSelect={setActiveCategoryId}
+              />
+            ) : null}
+
+            {activeTab === "import" ? (
+              <ImportHelp
+                categories={categories}
+                loadingExcel={loadingExcel}
+                onLoadPublicExcel={loadPublicExcel}
+              />
+            ) : null}
+
+            {activeTab === "rules" && activeCategory ? (
+              <RestrictionsPanel
+                category={activeCategory}
+                onAddRule={addRule}
+                onRemoveRule={removeRule}
+                onRefreshDraws={refreshCategoryDraws}
+                onUpdateScheduleConfig={setScheduleConfig}
+                onUpdatePair={updatePair}
+                onUpdateRule={updateRule}
+                scheduleConfig={scheduleConfig}
+              />
+            ) : null}
+
+            {activeTab === "draws" && activeCategory && activeDrawSet ? (
+              <DrawsPanel
                 category={activeCategory}
                 drawSet={activeDrawSet}
+                manualPairLocks={manualPairLocks[activeCategory.id] ?? {}}
                 manualScheduleOverrides={manualScheduleOverrides}
-                onAddPair={addPair}
-            onClearCategorySchedule={clearCategoryScheduleOverrides}
-            onRemovePair={removePair}
-            onResetManualSchedule={resetManualSchedule}
-            onMovePairInBracket={movePairInBracket}
-            onRandomizeBracket={randomizeCategoryBracket}
-            onUpdateManualSchedule={updateManualSchedule}
-            onUpdatePair={updatePair}
-            schedule={schedule.assignments}
+                onClearSchedule={clearCategorySchedule}
+                onMovePair={movePairInBracket}
+                onRandomize={randomizeCategory}
+                onRecalculateKeepingManual={recalculateKeepingManual}
+                onResetManualSchedule={resetManualSchedule}
+                onSelectWinner={selectWinner}
+                onToggleMatchupLock={toggleMatchupLock}
+                onUpdateManualSchedule={updateManualSchedule}
+                scheduleConfig={scheduleConfig}
+                schedule={schedule.assignments}
+              />
+            ) : null}
+
+            {activeTab === "public" ? (
+              <PublicAdminPanel
+                copied={copied}
+                onCopy={copyPublicLink}
+                onPublish={publishTournament}
+                publicPath={publicPath}
+                publicUrl={publicUrl}
+                published={Boolean(publishedSlug)}
+                rows={summaryRows}
+              />
+            ) : null}
+
+            {schedule.conflicts ? (
+              <Notice
+                icon={AlertTriangle}
+                tone="warning"
+                title="Horarios a revisar"
+                text={`${schedule.conflicts} partido(s) no respetan al 100% restricciones o pisan pista/hora.`}
               />
             ) : null}
           </>
-        ) : null}
-
-        {categories.length && schedule.conflicts ? (
-          <Notice
-            icon={AlertTriangle}
-            tone="warning"
-            title="Revisar horarios"
-            text={`${schedule.conflicts} partido(s) no encajan perfectamente con las restricciones y se han marcado en amarillo.`}
+        ) : (
+          <EmptyState
+            loading={loadingExcel}
+            onLoadPublicExcel={loadPublicExcel}
           />
-        ) : null}
-
-        {!categories.length ? (
-          <EmptyState />
-        ) : activeAdminTab === "draws" ? (
-          <div className="grid gap-6">
-            <BracketBoard
-              categoryId={activeCategory?.id || ""}
-              draw={mainDraw}
-              onPick={selectMainWinner}
-              schedule={schedule.assignments}
-              subtitle="Selecciona el ganador de cada partido. El perdedor de primera ronda aparece abajo."
-            />
-            <BracketBoard
-              categoryId={activeCategory?.id || ""}
-              draw={consolationDraw}
-              emptyText="La consolacion se llenara cuando marques perdedores en la primera ronda."
-              onPick={selectConsolationWinner}
-              schedule={schedule.assignments}
-              subtitle="Cuadro secundario con los perdedores del primer partido."
-            />
-          </div>
-        ) : null}
+        )}
       </div>
     </main>
   );
 }
 
-function AdminHeaderShell() {
-  return (
-    <header className="rounded-xl bg-[#07110d] p-5 text-white shadow-xl shadow-black/10 sm:p-7">
-      <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
-        <div>
-          <p className="text-xs font-bold uppercase tracking-[0.24em] text-[#c59b45]">
-            Padel bracket
-          </p>
-          <h1 className="mt-2 text-3xl font-black tracking-normal sm:text-5xl">
-            Cuadros del torneo
-          </h1>
-        </div>
-
-        <div className="grid grid-cols-2 gap-3 sm:flex">
-          <button
-            className="inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-white/10 px-4 text-sm font-bold text-white/40"
-            disabled
-            type="button"
-          >
-            <Upload className="h-4 w-4" />
-            Subir Excel
-          </button>
-          <button
-            className="inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-white/10 px-4 text-sm font-bold text-white/40"
-            disabled
-            type="button"
-          >
-            <Share2 className="h-4 w-4" />
-            Publicar
-          </button>
-        </div>
-      </div>
-    </header>
-  );
-}
-
-function AdminViewTabs({
-  activeTab,
-  onChange,
+function PreviewPanel({
+  categories,
+  onCancel,
+  onValidate,
 }: {
-  activeTab: AdminTab;
-  onChange: (tab: AdminTab) => void;
+  categories: CategoryData[];
+  onCancel: () => void;
+  onValidate: () => void;
 }) {
-  const tabs: { label: string; value: AdminTab }[] = [
-    { label: "Cuadros", value: "draws" },
-    { label: "Resumen", value: "summary" },
-  ];
-
   return (
-    <section className="rounded-xl border border-black/10 bg-white p-2 shadow-sm">
-      <div className="grid grid-cols-2 gap-2 sm:flex">
-        {tabs.map((tab) => (
+    <section className="wc-card wc-accent-top p-4 sm:p-5">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <p className="wc-eyebrow text-[var(--gold-600)]">Vista previa del Excel</p>
+          <h2 className="wc-title mt-1 text-2xl">
+            {categories.length} categorias · {countPairs(categories)} parejas
+          </h2>
+          <p className="mt-1 text-sm font-medium text-[var(--ink-soft)]">
+            Revisa lo que se va a cargar. Las restricciones ya vienen
+            autocompletadas en formato estructurado.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button className="wc-btn wc-btn-ghost" onClick={onCancel} type="button">
+            Cancelar
+          </button>
           <button
-            className={`h-10 rounded-lg px-4 text-sm font-black transition ${
-              activeTab === tab.value
-                ? "bg-[#0f6b4b] text-white"
-                : "bg-[#f7f7f3] text-[#111816] hover:bg-[#e8f3ee]"
-            }`}
-            key={tab.value}
-            onClick={() => onChange(tab.value)}
+            className="wc-btn wc-btn-primary"
+            onClick={onValidate}
             type="button"
           >
-            {tab.label}
+            <CheckCircle2 className="h-4 w-4" />
+            Validar carga
           </button>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-const scheduleDayOptions: { label: string; value: DayKey }[] = [
-  { label: "Jueves", value: "jueves" },
-  { label: "Viernes", value: "viernes" },
-  { label: "Sabado", value: "sabado" },
-];
-
-const courtOptions = Array.from({ length: courtCount }, (_, index) => index + 1);
-
-function timeOptionsForDay(day: DayKey) {
-  return Array.from(
-    new Set(
-      tournamentSlots()
-        .filter((slot) => slot.day === day)
-        .map((slot) => slot.time),
-    ),
-  );
-}
-
-function editableMatchesFromDrawSet(categoryId: string, drawSet?: CategoryDrawSet) {
-  if (!drawSet) return [];
-
-  return [
-    ...drawSet.mainDraw.rounds.flatMap((round) =>
-      round.matches.map((match) => ({
-        drawName: "Principal",
-        match,
-        roundName: round.name,
-        scheduleKey: matchScheduleKey(categoryId, match.id),
-      })),
-    ),
-    ...drawSet.consolationDraw.rounds.flatMap((round) =>
-      round.matches.map((match) => ({
-        drawName: "Consolacion",
-        match,
-        roundName: round.name,
-        scheduleKey: matchScheduleKey(categoryId, match.id),
-      })),
-    ),
-  ].filter(({ match }) => matchNeedsSchedule(match));
-}
-
-function matchTeamsLabel(match: Match) {
-  return [match.sideA?.name || "BYE", match.sideB?.name || "BYE"].join(" vs ");
-}
-
-function firstRoundPairSlots(category: CategoryData) {
-  const size = nextPowerOfTwo(category.pairs.length);
-  const slots = Array<Pair | null>(size).fill(null);
-
-  category.pairs.forEach((pair, index) => {
-    slots[index] = pair;
-  });
-
-  return Array.from({ length: size / 2 }, (_, matchIndex) => ({
-    matchLabel: `P${matchIndex + 1}`,
-    sideA: slots[matchIndex * 2],
-    sideAIndex: matchIndex * 2,
-    sideB: slots[matchIndex * 2 + 1],
-    sideBIndex: matchIndex * 2 + 1,
-  }));
-}
-
-function shufflePairs(pairs: Pair[]) {
-  const shuffled = [...pairs];
-
-  for (let index = shuffled.length - 1; index > 0; index -= 1) {
-    const swapIndex = Math.floor(Math.random() * (index + 1));
-    const current = shuffled[index];
-
-    shuffled[index] = shuffled[swapIndex];
-    shuffled[swapIndex] = current;
-  }
-
-  return shuffled;
-}
-
-type ScheduleSummaryRow = {
-  categoryName: string;
-  conflict: boolean;
-  court: number | null;
-  day: DayKey | null;
-  dayLabel: string;
-  drawName: string;
-  manual: boolean;
-  matchId: string;
-  minutes: number;
-  roundName: string;
-  scheduleKey: string;
-  teams: string;
-  time: string;
-};
-
-function buildScheduleSummaryRows(
-  categories: CategoryData[],
-  drawSets: CategoryDrawSet[],
-  schedule: Record<string, ScheduleAssignment>,
-) {
-  const categoryById = new Map(categories.map((category) => [category.id, category]));
-  const categoryOrder = new Map(
-    categories.map((category, index) => [category.id, index]),
-  );
-
-  return drawSets
-    .flatMap((drawSet) => {
-      const category = categoryById.get(drawSet.categoryId);
-      const categoryName = category?.name || "Categoria";
-      const drawRows = [
-        ...drawSet.mainDraw.rounds.flatMap((round) =>
-          round.matches.map((match) => ({
-            drawName: "Principal",
-            match,
-            roundName: round.name,
-          })),
-        ),
-        ...drawSet.consolationDraw.rounds.flatMap((round) =>
-          round.matches.map((match) => ({
-            drawName: "Consolacion",
-            match,
-            roundName: round.name,
-          })),
-        ),
-      ];
-
-      return drawRows
-        .filter(({ match }) => matchNeedsSchedule(match))
-        .map(({ drawName, match, roundName }) => {
-          const scheduleKey = matchScheduleKey(drawSet.categoryId, match.id);
-          const assignment = schedule[scheduleKey];
-
-          return {
-            categoryName,
-            conflict: Boolean(assignment?.conflict),
-            court: assignment?.court ?? null,
-            day: assignment?.day ?? null,
-            dayLabel: assignment?.dayLabel ?? "Sin dia",
-            drawName,
-            manual: Boolean(assignment?.manual),
-            matchId: match.id,
-            minutes: assignment?.minutes ?? Number.MAX_SAFE_INTEGER,
-            roundName,
-            scheduleKey,
-            teams: matchTeamsLabel(match),
-            time: assignment?.time ?? "Sin hora",
-            categorySort: categoryOrder.get(drawSet.categoryId) ?? 999,
-          };
-        });
-    })
-    .sort((left, right) => {
-      const dayDiff =
-        (left.day ? dayOrder[left.day] : 99) -
-        (right.day ? dayOrder[right.day] : 99);
-
-      if (dayDiff) return dayDiff;
-      if (left.minutes !== right.minutes) return left.minutes - right.minutes;
-      if ((left.court ?? 99) !== (right.court ?? 99)) {
-        return (left.court ?? 99) - (right.court ?? 99);
-      }
-      if (left.categorySort !== right.categorySort) {
-        return left.categorySort - right.categorySort;
-      }
-
-      return left.matchId.localeCompare(right.matchId);
-    });
-}
-
-function summaryDayClass(day: DayKey | null) {
-  if (day === "jueves") return "bg-sky-50 text-sky-900";
-  if (day === "viernes") return "bg-violet-50 text-violet-900";
-  if (day === "sabado") return "bg-emerald-50 text-emerald-900";
-
-  return "bg-stone-100 text-stone-700";
-}
-
-function summaryDayPillClass(day: DayKey | null) {
-  if (day === "jueves") return "bg-sky-200 text-sky-950";
-  if (day === "viernes") return "bg-violet-200 text-violet-950";
-  if (day === "sabado") return "bg-emerald-200 text-emerald-950";
-
-  return "bg-stone-200 text-stone-800";
-}
-
-function summaryCategoryClass(categoryName: string) {
-  const palette = [
-    "bg-[#e8f3ee] text-[#0b553b]",
-    "bg-[#fff3d6] text-[#7a5818]",
-    "bg-sky-100 text-sky-900",
-    "bg-rose-100 text-rose-900",
-    "bg-violet-100 text-violet-900",
-  ];
-  const index = normalizeText(categoryName)
-    .split("")
-    .reduce((sum, char) => sum + char.charCodeAt(0), 0);
-
-  return palette[index % palette.length];
-}
-
-function summaryDrawClass(drawName: string) {
-  return drawName === "Principal"
-    ? "bg-[#0f6b4b] text-white"
-    : "bg-[#c59b45] text-black";
-}
-
-function ScheduleSummaryPanel({ rows }: { rows: ScheduleSummaryRow[] }) {
-  return (
-    <section className="rounded-xl border border-black/10 bg-white p-4 shadow-sm">
-      <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <p className="text-xs font-bold uppercase tracking-[0.22em] text-[#0f6b4b]">
-            Resumen
-          </p>
-          <h2 className="mt-1 text-2xl font-black">Listado de partidos</h2>
-        </div>
-        <div className="rounded-lg bg-[#f7f7f3] px-3 py-2 text-sm font-black text-black/55">
-          {rows.length} partidos
         </div>
       </div>
-
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[1060px] border-collapse text-sm">
+      <div className="mt-4 overflow-x-auto">
+        <table className="w-full min-w-[720px] border-collapse text-sm">
           <thead>
-            <tr className="bg-[#07110d] text-left text-white">
-              <th className="px-3 py-3 font-bold">Dia</th>
-              <th className="px-3 py-3 font-bold">Hora</th>
-              <th className="px-3 py-3 font-bold">Pista</th>
-              <th className="px-3 py-3 font-bold">Categoria</th>
-              <th className="px-3 py-3 font-bold">Cuadro</th>
-              <th className="px-3 py-3 font-bold">Ronda</th>
-              <th className="px-3 py-3 font-bold">Partido</th>
-              <th className="px-3 py-3 font-bold">Parejas</th>
-              <th className="px-3 py-3 font-bold">Estado</th>
+            <tr className="border-b border-[var(--line-strong)] text-left font-display text-xs uppercase tracking-[0.14em] text-[var(--ink-faint)]">
+              <th className="px-3 py-2.5 font-semibold">Categoria</th>
+              <th className="px-3 py-2.5 font-semibold">Parejas</th>
+              <th className="px-3 py-2.5 font-semibold">Reglas auto</th>
+              <th className="px-3 py-2.5 font-semibold">A revisar</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((row) => (
-              <tr
-                className={`border-b border-black/10 ${
-                  row.conflict ? "bg-amber-50" : summaryDayClass(row.day)
-                }`}
-                key={row.scheduleKey}
-              >
-                <td className="px-3 py-3">
-                  <span
-                    className={`rounded px-2 py-1 text-xs font-black ${summaryDayPillClass(row.day)}`}
-                  >
-                    {row.dayLabel}
-                  </span>
-                </td>
-                <td className="px-3 py-3">
-                  <span className="rounded bg-white/75 px-2 py-1 font-black">
-                    {row.time}
-                  </span>
-                </td>
-                <td className="px-3 py-3">
-                  <span className="rounded bg-black/10 px-2 py-1 font-black">
-                    {row.court ? `Pista ${row.court}` : "-"}
-                  </span>
-                </td>
-                <td className="px-3 py-3">
-                  <span
-                    className={`rounded px-2 py-1 text-xs font-black ${summaryCategoryClass(row.categoryName)}`}
-                  >
-                    {row.categoryName}
-                  </span>
-                </td>
-                <td className="px-3 py-3">
-                  <span
-                    className={`rounded px-2 py-1 text-xs font-black ${summaryDrawClass(row.drawName)}`}
-                  >
-                    {row.drawName}
-                  </span>
-                </td>
-                <td className="px-3 py-3">{row.roundName}</td>
-                <td className="px-3 py-3 font-black">{row.matchId}</td>
-                <td className="px-3 py-3 font-bold">{row.teams}</td>
-                <td className="px-3 py-3">
-                  <span
-                    className={`rounded px-2 py-1 text-xs font-black ${
-                      row.conflict
-                        ? "bg-amber-200 text-amber-950"
-                        : row.manual
-                          ? "bg-[#fff3d6] text-[#7a5818]"
-                          : "bg-[#e8f3ee] text-[#0b553b]"
-                    }`}
-                  >
-                    {row.conflict ? "Revisar" : row.manual ? "Manual" : "Auto"}
-                  </span>
-                </td>
-              </tr>
-            ))}
+            {categories.map((category) => {
+              const review = category.pairs.filter(
+                (pair) => pair.review,
+              ).length;
+              const rules = category.pairs.reduce(
+                (total, pair) => total + pair.rules.length,
+                0,
+              );
+
+              return (
+                <tr
+                  className="border-b border-[var(--line)] last:border-0"
+                  key={category.id}
+                >
+                  <td className="px-3 py-2.5">
+                    <span className="flex items-center gap-2 font-semibold">
+                      <span
+                        className="wc-crest"
+                        style={{ backgroundColor: categoryCrestColor(category.id) }}
+                      />
+                      {category.name}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2.5 tabular font-semibold">
+                    {category.pairs.length}
+                  </td>
+                  <td className="px-3 py-2.5 tabular text-[var(--ink-soft)]">
+                    {rules}
+                  </td>
+                  <td className="px-3 py-2.5">
+                    <span
+                      className={`wc-chip ${review ? "wc-chip-amber" : "wc-chip-green"}`}
+                    >
+                      {review || "OK"}
+                    </span>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -2237,61 +945,1108 @@ function ScheduleSummaryPanel({ rows }: { rows: ScheduleSummaryRow[] }) {
   );
 }
 
-function TournamentEditPanel({
+function EmptyState({
+  loading,
+  onLoadPublicExcel,
+}: {
+  loading: boolean;
+  onLoadPublicExcel: () => void;
+}) {
+  return (
+    <section className="wc-card grid min-h-[440px] place-items-center p-8 text-center">
+      <div className="max-w-xl">
+        <span className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-[var(--pitch-900)] text-[var(--gold-300)]">
+          <FileSpreadsheet className="h-8 w-8" />
+        </span>
+        <h2 className="wc-title mt-5 text-3xl">Carga el cuadro del torneo</h2>
+        <p className="mx-auto mt-2 text-sm font-medium text-[var(--ink-soft)]">
+          La app leera categorias, parejas y restricciones, y propondra reglas
+          de disponibilidad editables antes de generar los cuadros.
+        </p>
+        <button
+          className="wc-btn wc-btn-primary mx-auto mt-6 h-11"
+          disabled={loading}
+          onClick={onLoadPublicExcel}
+          type="button"
+        >
+          <FileSpreadsheet className="h-4 w-4" />
+          {loading ? "Cargando..." : "Cargar Excel de ejemplo"}
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function ImportHelp({
+  categories,
+  loadingExcel,
+  onLoadPublicExcel,
+}: {
+  categories: CategoryData[];
+  loadingExcel: boolean;
+  onLoadPublicExcel: () => void;
+}) {
+  return (
+    <section className="wc-card wc-accent-top p-4 sm:p-5">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <p className="wc-eyebrow">Datos cargados</p>
+          <h2 className="wc-title mt-1 text-2xl">Plantilla del torneo</h2>
+          <p className="mt-1 text-sm font-medium text-[var(--ink-soft)]">
+            El Excel activo tiene {categories.length} categorias y{" "}
+            {countPairs(categories)} parejas. Puedes recargar el de ejemplo o
+            subir uno nuevo desde la cabecera.
+          </p>
+        </div>
+        <button
+          className="wc-btn wc-btn-ghost"
+          disabled={loadingExcel}
+          onClick={onLoadPublicExcel}
+          type="button"
+        >
+          <RotateCcw className="h-4 w-4" />
+          Recargar Excel
+        </button>
+      </div>
+      <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        {categories.map((category) => {
+          const review = category.pairs.filter((pair) => pair.review).length;
+
+          return (
+            <article className="wc-inset p-3.5" key={category.id}>
+              <div className="flex items-center gap-2">
+                <span
+                  className="wc-crest"
+                  style={{ backgroundColor: categoryCrestColor(category.id) }}
+                />
+                <h3 className="font-display text-base font-semibold uppercase tracking-wide">
+                  {category.name}
+                </h3>
+              </div>
+              <div className="mt-2.5 flex flex-wrap gap-1.5">
+                <span className="wc-chip wc-chip-neutral">
+                  <Users className="h-3.5 w-3.5" />
+                  {category.pairs.length} parejas
+                </span>
+                <span
+                  className={`wc-chip ${review ? "wc-chip-amber" : "wc-chip-green"}`}
+                >
+                  {review ? `${review} a revisar` : "Sin avisos"}
+                </span>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function AdminTabs({
+  activeTab,
+  categoriesCount,
+  lockCount,
+  onChange,
+  reviewCount,
+  scheduleTotal,
+}: {
+  activeTab: AdminTab;
+  categoriesCount: number;
+  lockCount: number;
+  onChange: (tab: AdminTab) => void;
+  reviewCount: number;
+  scheduleTotal: number;
+}) {
+  const tabDetails: Record<
+    AdminTab,
+    { index: string; status: string; done: boolean }
+  > = {
+    import: {
+      done: categoriesCount > 0,
+      index: "1",
+      status: categoriesCount ? `${categoriesCount} categorias` : "Pendiente",
+    },
+    rules: {
+      done: categoriesCount > 0 && reviewCount === 0,
+      index: "2",
+      status: reviewCount ? `${reviewCount} a revisar` : "Validado",
+    },
+    draws: {
+      done: scheduleTotal > 0,
+      index: "3",
+      status: scheduleTotal ? `${scheduleTotal} partidos` : "Pendiente",
+    },
+    public: {
+      done: scheduleTotal > 0,
+      index: "4",
+      status: lockCount ? `${lockCount} candados` : "Publicacion",
+    },
+  };
+
+  return (
+    <nav className="wc-stepper" aria-label="Fases del torneo">
+      {tabs.map((tab) => {
+        const active = activeTab === tab.id;
+        const done = tabDetails[tab.id].done;
+
+        return (
+          <button
+            aria-current={active ? "step" : undefined}
+            className={`wc-step ${active ? "wc-step-active" : ""}`}
+            key={tab.id}
+            onClick={() => onChange(tab.id)}
+            type="button"
+          >
+            <span
+              className={`wc-step-badge ${
+                active
+                  ? "wc-step-badge-active"
+                  : done
+                    ? "wc-step-badge-done"
+                    : "wc-step-badge-idle"
+              }`}
+            >
+              {done && !active ? (
+                <CheckCircle2 className="h-5 w-5" />
+              ) : (
+                tabDetails[tab.id].index
+              )}
+            </span>
+            <span className="min-w-0">
+              <span
+                className={`wc-step-name ${active ? "text-white" : "text-[var(--ink)]"}`}
+              >
+                {tab.label}
+              </span>
+              <span
+                className={`wc-step-status block truncate ${
+                  active ? "text-[var(--gold-300)]" : "text-[var(--ink-soft)]"
+                }`}
+              >
+                {tabDetails[tab.id].status}
+              </span>
+            </span>
+          </button>
+        );
+      })}
+    </nav>
+  );
+}
+
+const categoryCrestPalette = [
+  "#0d8a52",
+  "#2563eb",
+  "#d99e0b",
+  "#e11d48",
+  "#7c3aed",
+  "#0891b2",
+  "#ea580c",
+  "#0f766e",
+];
+
+function categoryCrestColor(categoryId: string) {
+  const total = Array.from(categoryId).reduce(
+    (sum, character) => sum + character.charCodeAt(0),
+    0,
+  );
+
+  return categoryCrestPalette[total % categoryCrestPalette.length];
+}
+
+function CategoryTabs({
+  activeCategoryId,
+  categories,
+  onSelect,
+}: {
+  activeCategoryId: string;
+  categories: CategoryData[];
+  onSelect: (categoryId: string) => void;
+}) {
+  return (
+    <section className="wc-card-flat p-2.5">
+      <div className="flex flex-wrap gap-2">
+        {categories.map((category) => {
+          const active = category.id === activeCategoryId;
+
+          return (
+            <button
+              className={`wc-pill ${active ? "wc-pill-active" : ""}`}
+              key={category.id}
+              onClick={() => onSelect(category.id)}
+              type="button"
+            >
+              <span
+                className="wc-crest"
+                style={{ backgroundColor: categoryCrestColor(category.id) }}
+              />
+              {category.name}
+              <span className="wc-pill-count">{category.pairs.length}</span>
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function RestrictionsPanel({
+  category,
+  onAddRule,
+  onRefreshDraws,
+  onRemoveRule,
+  onUpdateScheduleConfig,
+  onUpdatePair,
+  onUpdateRule,
+  scheduleConfig,
+}: {
+  category: CategoryData;
+  onAddRule: (categoryId: string, pairId: string) => void;
+  onRefreshDraws: (categoryId: string) => void;
+  onRemoveRule: (categoryId: string, pairId: string, ruleId: string) => void;
+  onUpdateScheduleConfig: (config: TournamentScheduleConfig) => void;
+  onUpdatePair: (
+    categoryId: string,
+    pairId: string,
+    patch: Partial<Pair>,
+  ) => void;
+  onUpdateRule: (
+    categoryId: string,
+    pairId: string,
+    ruleId: string,
+    patch: Partial<RestrictionRule>,
+  ) => void;
+  scheduleConfig: TournamentScheduleConfig;
+}) {
+  return (
+    <section className="wc-card wc-accent-top p-4 sm:p-5">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+        <div>
+          <p className="wc-eyebrow">Disponibilidad de parejas</p>
+          <h2 className="wc-title mt-1 text-2xl">{category.name}</h2>
+          <p className="mt-1 max-w-3xl text-sm font-medium text-[var(--ink-soft)]">
+            Convierte texto libre en{" "}
+            <span className="font-bold text-[var(--pitch-700)]">SOLO PUEDE</span>{" "}
+            o <span className="font-bold text-[var(--coral-600)]">NO PUEDE</span>{" "}
+            con rango horario. Fuera de un NO PUEDE se considera disponible.
+          </p>
+        </div>
+        <button
+          className="wc-btn wc-btn-primary"
+          onClick={() => onRefreshDraws(category.id)}
+          type="button"
+        >
+          <RotateCcw className="h-4 w-4" />
+          Validar y recalcular
+        </button>
+      </div>
+
+      <ScheduleConfigPanel
+        onChange={onUpdateScheduleConfig}
+        scheduleConfig={scheduleConfig}
+      />
+
+      <div className="mt-4 grid gap-3">
+        {category.pairs.map((pair) => (
+          <article
+            className={`rounded-2xl border p-3.5 ${
+              pair.review
+                ? "border-[var(--amber-500)] bg-[var(--amber-50)]"
+                : "border-[var(--line)] bg-[var(--surface-2)]"
+            }`}
+            key={pair.id}
+          >
+            <div className="grid gap-3 xl:grid-cols-[260px_minmax(260px,1fr)_minmax(420px,1.2fr)]">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="wc-seed">{pair.seed}</span>
+                  <p className="font-display text-xs font-semibold uppercase tracking-[0.16em] text-[var(--ink-faint)]">
+                    Pareja
+                  </p>
+                </div>
+                <h3 className="mt-1.5 text-base font-bold leading-tight">
+                  {pair.playerOne} / {pair.playerTwo}
+                </h3>
+                <label className="mt-3 inline-flex cursor-pointer items-center gap-2 text-sm font-bold">
+                  <input
+                    checked={pair.review}
+                    className="h-4 w-4 accent-[var(--amber-500)]"
+                    onChange={(event) =>
+                      onUpdatePair(category.id, pair.id, {
+                        review: event.target.checked,
+                      })
+                    }
+                    type="checkbox"
+                  />
+                  Marcar para revisar
+                </label>
+              </div>
+
+              <div className="wc-card-flat p-3">
+                <p className="font-display text-xs font-semibold uppercase tracking-[0.16em] text-[var(--ink-faint)]">
+                  Texto del Excel
+                </p>
+                <p className="mt-1.5 text-sm font-semibold text-[var(--ink)]">
+                  {pair.rawRestriction || "Sin restriccion compacta"}
+                </p>
+                {pair.rawNotes ? (
+                  <p className="mt-1.5 text-sm text-[var(--ink-soft)]">
+                    {pair.rawNotes}
+                  </p>
+                ) : null}
+                {pair.reviewReasons.length ? (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {pair.reviewReasons.map((reason) => (
+                      <span className="wc-chip wc-chip-amber" key={reason}>
+                        {reason}
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="grid content-start gap-2">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="font-display text-xs font-semibold uppercase tracking-[0.16em] text-[var(--ink-faint)]">
+                    Reglas estructuradas
+                  </p>
+                  <button
+                    className="wc-btn wc-btn-ghost wc-btn-sm"
+                    onClick={() => onAddRule(category.id, pair.id)}
+                    type="button"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    Regla
+                  </button>
+                </div>
+
+                {pair.rules.length ? (
+                  pair.rules.map((rule) => (
+                    <RuleEditor
+                      key={rule.id}
+                      onRemove={() =>
+                        onRemoveRule(category.id, pair.id, rule.id)
+                      }
+                      onUpdate={(patch) =>
+                        onUpdateRule(category.id, pair.id, rule.id, patch)
+                      }
+                      rule={rule}
+                    />
+                  ))
+                ) : (
+                  <div className="rounded-xl border border-dashed border-[var(--line-strong)] bg-[var(--surface)] p-3 text-sm font-semibold text-[var(--ink-faint)]">
+                    Sin reglas: puede jugar en cualquier hueco disponible.
+                  </div>
+                )}
+              </div>
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function ScheduleConfigPanel({
+  onChange,
+  scheduleConfig,
+}: {
+  onChange: (config: TournamentScheduleConfig) => void;
+  scheduleConfig: TournamentScheduleConfig;
+}) {
+  const config = normalizeScheduleConfig(scheduleConfig);
+  const priorityLabels = ["Mayoria", "Luego", "Ultimo recurso"];
+
+  function updateWindow(
+    day: DayKey,
+    index: number,
+    patch: Partial<ScheduleWindow>,
+  ) {
+    const windows = [...config.dayWindows[day]];
+
+    windows[index] = {
+      ...windows[index],
+      ...patch,
+    };
+
+    onChange({
+      ...config,
+      dayWindows: {
+        ...config.dayWindows,
+        [day]: windows,
+      },
+    });
+  }
+
+  function updatePriority(index: number, day: DayKey) {
+    const nextPriority = [...config.dayPriority];
+    const currentIndex = nextPriority.indexOf(day);
+
+    if (currentIndex >= 0) {
+      const currentDay = nextPriority[index];
+
+      nextPriority[index] = day;
+      nextPriority[currentIndex] = currentDay;
+    } else {
+      nextPriority[index] = day;
+    }
+
+    onChange({
+      ...config,
+      dayPriority: nextPriority,
+    });
+  }
+
+  return (
+    <section className="mt-4 rounded-2xl border border-[var(--line)] bg-[var(--surface-2)] p-3.5">
+      <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+        <div className="min-w-0">
+          <p className="wc-eyebrow">Horarios para calcular</p>
+          <h3 className="wc-title mt-0.5 text-lg">Disponibilidad del torneo</h3>
+          <p className="mt-1 text-sm font-medium text-[var(--ink-soft)]">
+            Estos tramos se usan al validar, sortear y recalcular con las 8 pistas
+            compartidas.
+          </p>
+        </div>
+        <button
+          className="wc-btn wc-btn-ghost wc-btn-sm"
+          onClick={() => onChange(defaultScheduleConfig)}
+          type="button"
+        >
+          <RotateCcw className="h-4 w-4" />
+          Restaurar defecto
+        </button>
+      </div>
+
+      <div className="mt-3 grid gap-3 xl:grid-cols-[minmax(0,1.5fr)_minmax(280px,0.8fr)]">
+        <div className="grid gap-2 lg:grid-cols-3">
+          {dayOptions.map((day) => (
+            <article
+              className="rounded-xl border border-[var(--line)] bg-[var(--surface)] p-3"
+              key={day.key}
+            >
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <h4 className="font-display text-xs font-semibold uppercase tracking-[0.14em] text-[var(--ink-faint)]">
+                  {day.label}
+                </h4>
+                <span className="wc-chip wc-chip-neutral">
+                  {config.dayWindows[day.key].length} tramo
+                  {config.dayWindows[day.key].length === 1 ? "" : "s"}
+                </span>
+              </div>
+              <div className="grid gap-2">
+                {config.dayWindows[day.key].map((window, index) => (
+                  <div
+                    className="grid grid-cols-[auto_1fr_1fr] items-center gap-2"
+                    key={`${day.key}-${index}`}
+                  >
+                    <span className="font-display text-[0.62rem] font-bold uppercase tracking-[0.12em] text-[var(--ink-faint)]">
+                      T{index + 1}
+                    </span>
+                    <input
+                      className="wc-field h-9 min-w-0 tabular"
+                      onChange={(event) =>
+                        updateWindow(day.key, index, {
+                          from: event.target.value,
+                        })
+                      }
+                      type="time"
+                      value={window.from}
+                    />
+                    <input
+                      className="wc-field h-9 min-w-0 tabular"
+                      onChange={(event) =>
+                        updateWindow(day.key, index, {
+                          to: event.target.value,
+                        })
+                      }
+                      type="time"
+                      value={window.to}
+                    />
+                  </div>
+                ))}
+              </div>
+            </article>
+          ))}
+        </div>
+
+        <article className="rounded-xl border border-[var(--line)] bg-[var(--surface)] p-3">
+          <p className="font-display text-xs font-semibold uppercase tracking-[0.14em] text-[var(--ink-faint)]">
+            Prioridad automatica
+          </p>
+          <div className="mt-2 grid gap-2">
+            {config.dayPriority.map((day, index) => (
+              <label className="grid gap-1" key={`${day}-${index}`}>
+                <span className="text-xs font-bold text-[var(--ink-soft)]">
+                  {priorityLabels[index] ?? `Prioridad ${index + 1}`}
+                </span>
+                <select
+                  className="wc-field h-9"
+                  onChange={(event) =>
+                    updatePriority(index, event.target.value as DayKey)
+                  }
+                  value={day}
+                >
+                  {dayOptions.map((option) => (
+                    <option key={option.key} value={option.key}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ))}
+          </div>
+        </article>
+      </div>
+    </section>
+  );
+}
+
+function RuleEditor({
+  onRemove,
+  onUpdate,
+  rule,
+}: {
+  onRemove: () => void;
+  onUpdate: (patch: Partial<RestrictionRule>) => void;
+  rule: RestrictionRule;
+}) {
+  const available = rule.mode === "available";
+
+  return (
+    <div
+      className={`grid grid-cols-2 gap-2 rounded-xl border-l-4 border border-[var(--line)] bg-[var(--surface)] p-2 sm:grid-cols-[140px_104px_1fr_1fr_auto] ${
+        available
+          ? "border-l-[var(--pitch-600)]"
+          : "border-l-[var(--coral-500)]"
+      }`}
+    >
+      <select
+        className={`wc-field h-9 ${
+          available
+            ? "bg-[var(--pitch-50)] text-[var(--pitch-800)]"
+            : "bg-[var(--coral-50)] text-[var(--coral-600)]"
+        }`}
+        onChange={(event) => onUpdate({ mode: event.target.value as RuleMode })}
+        value={rule.mode}
+      >
+        <option value="available">SOLO PUEDE</option>
+        <option value="blocked">NO PUEDE</option>
+      </select>
+      <select
+        className="wc-field h-9"
+        onChange={(event) => onUpdate({ day: event.target.value as DayKey })}
+        value={rule.day}
+      >
+        {dayOptions.map((day) => (
+          <option key={day.key} value={day.key}>
+            {day.label}
+          </option>
+        ))}
+      </select>
+      <input
+        className="wc-field h-9 tabular"
+        onChange={(event) => onUpdate({ from: event.target.value })}
+        type="time"
+        value={rule.from}
+      />
+      <input
+        className="wc-field h-9 tabular"
+        onChange={(event) => onUpdate({ to: event.target.value })}
+        type="time"
+        value={rule.to}
+      />
+      <button
+        aria-label="Eliminar regla"
+        className="wc-icon-btn h-9 w-9 hover:border-[var(--coral-500)] hover:bg-[var(--coral-50)] hover:text-[var(--coral-600)]"
+        onClick={onRemove}
+        type="button"
+      >
+        <Trash2 className="h-4 w-4" />
+      </button>
+    </div>
+  );
+}
+
+function DrawsPanel({
   category,
   drawSet,
+  manualPairLocks,
   manualScheduleOverrides,
-  onAddPair,
-  onClearCategorySchedule,
-  onMovePairInBracket,
-  onRandomizeBracket,
-  onRemovePair,
+  onClearSchedule,
+  onMovePair,
+  onRandomize,
+  onRecalculateKeepingManual,
   onResetManualSchedule,
+  onSelectWinner,
+  onToggleMatchupLock,
   onUpdateManualSchedule,
-  onUpdatePair,
+  scheduleConfig,
   schedule,
 }: {
   category: CategoryData;
-  drawSet?: CategoryDrawSet;
+  drawSet: CategoryDrawSet;
+  manualPairLocks: PairLockMap;
   manualScheduleOverrides: ManualScheduleMap;
-  onAddPair: (categoryId: string) => void;
-  onClearCategorySchedule: (categoryId: string) => void;
-  onMovePairInBracket: (
-    categoryId: string,
-    slotIndex: number,
-    pairId: string,
+  onClearSchedule: (categoryId: string) => void;
+  onMovePair: (categoryId: string, slotIndex: number, pairId: string) => void;
+  onRandomize: (categoryId: string) => void;
+  onRecalculateKeepingManual: () => void;
+  onResetManualSchedule: (scheduleKey: string) => void;
+  onSelectWinner: (categoryId: string, match: Match, team: Team) => void;
+  onToggleMatchupLock: (categoryId: string, slotIndexes: number[]) => void;
+  onUpdateManualSchedule: (
+    scheduleKey: string,
+    override: ManualScheduleOverride,
   ) => void;
-  onRandomizeBracket: (categoryId: string) => void;
-  onRemovePair: (categoryId: string, pairId: string) => void;
+  scheduleConfig: TournamentScheduleConfig;
+  schedule: Record<string, ScheduleAssignment>;
+}) {
+  return (
+    <div className="grid gap-5">
+      <section className="wc-card wc-accent-top p-4 sm:p-5">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex items-center gap-2.5">
+            <span
+              className="wc-crest"
+              style={{ backgroundColor: categoryCrestColor(category.id) }}
+            />
+            <div>
+              <p className="wc-eyebrow">Cuadro activo</p>
+              <h2 className="wc-title mt-0.5 text-2xl">{category.name}</h2>
+            </div>
+          </div>
+          <button
+            className="wc-btn wc-btn-primary"
+            onClick={() => onRandomize(category.id)}
+            type="button"
+          >
+            <Shuffle className="h-4 w-4" />
+            Sortear cuadro
+          </button>
+        </div>
+      </section>
+
+      <ScheduleEditor
+        categoryId={category.id}
+        drawSet={drawSet}
+        manualScheduleOverrides={manualScheduleOverrides}
+        onClearSchedule={onClearSchedule}
+        onRecalculateKeepingManual={onRecalculateKeepingManual}
+        onResetManualSchedule={onResetManualSchedule}
+        onUpdateManualSchedule={onUpdateManualSchedule}
+        scheduleConfig={scheduleConfig}
+        schedule={schedule}
+      />
+
+      <MatchupEditor
+        category={category}
+        manualPairLocks={manualPairLocks}
+        onMovePair={onMovePair}
+        onToggleLock={onToggleMatchupLock}
+      />
+
+      <section className="wc-wide grid gap-5">
+        <BracketView
+          categoryId={category.id}
+          draw={drawSet.mainDraw}
+          onSelectWinner={onSelectWinner}
+          schedule={schedule}
+          title="Cuadro principal"
+        />
+        <BracketView
+          categoryId={category.id}
+          draw={drawSet.consolationDraw}
+          onSelectWinner={onSelectWinner}
+          schedule={schedule}
+          title="Consolacion"
+        />
+      </section>
+    </div>
+  );
+}
+
+function MatchupEditor({
+  category,
+  manualPairLocks,
+  onMovePair,
+  onToggleLock,
+}: {
+  category: CategoryData;
+  manualPairLocks: PairLockMap;
+  onMovePair: (categoryId: string, slotIndex: number, pairId: string) => void;
+  onToggleLock: (categoryId: string, slotIndexes: number[]) => void;
+}) {
+  const lockedPairIds = new Set(Object.values(manualPairLocks));
+  const matchupSlots = Array.from(
+    { length: Math.ceil(category.pairs.length / 2) },
+    (_, index) => [index * 2, index * 2 + 1],
+  );
+
+  return (
+    <section className="wc-card-flat p-4">
+      <div className="flex flex-col gap-1.5 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <p className="wc-eyebrow">Emparejamientos de 1a ronda</p>
+          <h3 className="wc-title mt-0.5 text-lg">Bloquea los cruces</h3>
+        </div>
+        <span
+          className={`wc-chip ${
+            Object.keys(manualPairLocks).length
+              ? "wc-chip-green"
+              : "wc-chip-neutral"
+          }`}
+        >
+          <LockKeyhole className="h-3.5 w-3.5" />
+          {Object.keys(manualPairLocks).length
+            ? `${Object.keys(manualPairLocks).length} slots protegidos`
+            : "Sin cruces bloqueados"}
+        </span>
+      </div>
+      <div className="mt-3 grid gap-3 lg:grid-cols-2 xl:grid-cols-3">
+        {matchupSlots.map((slots, matchupIndex) => {
+          const lockableSlots = slots.filter((slot) => category.pairs[slot]);
+          const locked = lockableSlots.length > 0 && lockableSlots.every((slot) =>
+            Boolean(manualPairLocks[String(slot)]),
+          );
+
+          return (
+            <article
+              className={`rounded-xl border p-3 ${
+                locked
+                  ? "border-[var(--pitch-600)] bg-[var(--pitch-50)]"
+                  : "border-[var(--line)] bg-[var(--surface)]"
+              }`}
+              key={slots.join("-")}
+            >
+              <div className="mb-3 flex items-center justify-between gap-2">
+                <p className="font-display text-xs font-semibold uppercase tracking-[0.14em] text-[var(--ink-faint)]">
+                  Partido {matchupIndex + 1}
+                </p>
+                <button
+                  aria-label={
+                    locked
+                      ? `Desbloquear partido ${matchupIndex + 1}`
+                      : `Bloquear partido ${matchupIndex + 1}`
+                  }
+                  className={`inline-flex h-9 w-9 items-center justify-center rounded-lg border transition ${
+                    locked
+                      ? "border-[var(--pitch-600)] bg-[var(--pitch-600)] text-white hover:bg-[var(--pitch-700)]"
+                      : "border-[var(--line-strong)] bg-[var(--surface)] text-[var(--ink-soft)] hover:border-[var(--pitch-500)] hover:text-[var(--pitch-700)]"
+                  }`}
+                  onClick={() => onToggleLock(category.id, lockableSlots)}
+                  title={locked ? "Desbloquear cruce" : "Bloquear cruce"}
+                  type="button"
+                >
+                  {locked ? (
+                    <LockKeyhole className="h-4 w-4" />
+                  ) : (
+                    <LockOpen className="h-4 w-4" />
+                  )}
+                </button>
+              </div>
+
+              <div className="grid gap-2">
+                {slots.map((slot) => {
+                  const pair = category.pairs[slot];
+                  const slotLocked = Boolean(manualPairLocks[String(slot)]);
+
+                  return (
+                    <label className="grid min-w-0 gap-1" key={slot}>
+                      <span className="font-display text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--ink-faint)]">
+                        Slot {slot + 1}
+                      </span>
+                      {pair ? (
+                        <select
+                          className="wc-field h-10 w-full min-w-0 truncate"
+                          disabled={slotLocked}
+                          onChange={(event) =>
+                            onMovePair(category.id, slot, event.target.value)
+                          }
+                          value={pair.id}
+                        >
+                          {category.pairs.map((option) => (
+                            <option
+                              disabled={
+                                lockedPairIds.has(option.id) &&
+                                option.id !== pair.id
+                              }
+                              key={option.id}
+                              value={option.id}
+                            >
+                              {option.seed}. {option.playerOne} /{" "}
+                              {option.playerTwo}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <div className="flex h-10 items-center rounded-lg border border-dashed border-[var(--line-strong)] bg-[var(--surface-2)] px-2 text-sm font-bold text-[var(--ink-faint)]">
+                          Bye
+                        </div>
+                      )}
+                    </label>
+                  );
+                })}
+              </div>
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function BracketView({
+  categoryId,
+  draw,
+  onSelectWinner,
+  readOnly = false,
+  schedule,
+  title,
+}: {
+  categoryId: string;
+  draw: Draw;
+  onSelectWinner?: (categoryId: string, match: Match, team: Team) => void;
+  readOnly?: boolean;
+  schedule: Record<string, ScheduleAssignment>;
+  title: string;
+}) {
+  const isConsolation = draw.kind === "consolation";
+
+  return (
+    <section className="wc-card overflow-hidden p-4 sm:p-5">
+      <div className="mb-4 flex items-end justify-between gap-3">
+        <div className="flex items-center gap-2.5">
+          <span
+            className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${
+              isConsolation
+                ? "bg-[var(--court-600)] text-white"
+                : "bg-[var(--pitch-900)] text-[var(--gold-300)]"
+            }`}
+          >
+            {isConsolation ? (
+              <Users className="h-5 w-5" />
+            ) : (
+              <Trophy className="h-5 w-5" />
+            )}
+          </span>
+          <div>
+            <h2 className="wc-title text-xl">{title}</h2>
+            <p className="mt-0.5 text-sm font-medium text-[var(--ink-soft)]">
+              {draw.rounds.length
+                ? "Selecciona ganadores para avanzar"
+                : "Pendiente"}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {draw.rounds.length ? (
+        <div className="padel-bracket-scroll overflow-x-auto pb-2">
+          <div className="padel-bracket">
+            {draw.rounds.map((round, roundIndex) => {
+              const isFinal = roundIndex === draw.rounds.length - 1;
+
+              return (
+                <div className="flex min-w-[216px] flex-col" key={round.id}>
+                  <div
+                    className={`wc-round-label mb-3 ${
+                      isFinal
+                        ? "wc-round-label-final"
+                        : isConsolation
+                          ? "wc-round-label-blue"
+                          : ""
+                    }`}
+                  >
+                    {round.name}
+                  </div>
+                  <div
+                    className={`padel-round ${isFinal ? "padel-round--final" : ""}`}
+                  >
+                    {round.matches.map((match) => (
+                      <div className="padel-match-cell" key={match.id}>
+                        <MatchCard
+                          categoryId={categoryId}
+                          isFinal={isFinal}
+                          match={match}
+                          onSelectWinner={onSelectWinner}
+                          readOnly={readOnly}
+                          schedule={schedule[matchScheduleKey(categoryId, match)]}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ) : (
+        <div className="rounded-xl border border-dashed border-[var(--line-strong)] bg-[var(--surface-2)] p-6 text-sm font-semibold text-[var(--ink-faint)]">
+          La consolacion aparece cuando marques perdedores de primera ronda.
+        </div>
+      )}
+    </section>
+  );
+}
+
+function MatchCard({
+  categoryId,
+  isFinal = false,
+  match,
+  onSelectWinner,
+  readOnly,
+  schedule,
+}: {
+  categoryId: string;
+  isFinal?: boolean;
+  match: Match;
+  onSelectWinner?: (categoryId: string, match: Match, team: Team) => void;
+  readOnly: boolean;
+  schedule?: ScheduleAssignment;
+}) {
+  const playable = isPlayableMatch(match);
+  const champion = isFinal && Boolean(match.winner);
+  // Conflicts are internal-only: never surface them on the public (read-only) view.
+  const showConflict = Boolean(schedule?.conflict) && !readOnly;
+
+  return (
+    <article
+      className={`wc-match ${
+        champion
+          ? "wc-match-champion"
+          : showConflict
+            ? "wc-match-conflict"
+            : ""
+      }`}
+    >
+      <div className="mb-2 flex items-start justify-between gap-2">
+        <p className="wc-match-when min-w-0">
+          {schedule ? (
+            <>
+              {schedule.dayLabel} {schedule.time}
+              <span className="wc-match-court"> · Pista {schedule.court}</span>
+            </>
+          ) : (
+            <span className="text-[var(--ink-faint)]">Sin horario</span>
+          )}
+        </p>
+        <span className="wc-match-num">{match.id}</span>
+      </div>
+      <TeamButton
+        active={match.winner?.id === match.sideA?.id}
+        champion={champion}
+        disabled={
+          readOnly ||
+          !playable ||
+          !match.sideA ||
+          Boolean(match.sideA.isPlaceholder)
+        }
+        onClick={() =>
+          match.sideA && onSelectWinner?.(categoryId, match, match.sideA)
+        }
+        team={match.sideA}
+      />
+      <TeamButton
+        active={match.winner?.id === match.sideB?.id}
+        champion={champion}
+        disabled={
+          readOnly ||
+          !playable ||
+          !match.sideB ||
+          Boolean(match.sideB.isPlaceholder)
+        }
+        onClick={() =>
+          match.sideB && onSelectWinner?.(categoryId, match, match.sideB)
+        }
+        team={match.sideB}
+      />
+    </article>
+  );
+}
+
+function TeamButton({
+  active,
+  champion = false,
+  disabled,
+  onClick,
+  team,
+}: {
+  active: boolean;
+  champion?: boolean;
+  disabled: boolean;
+  onClick: () => void;
+  team: Team | null;
+}) {
+  return (
+    <button
+      className={`wc-team ${active ? "wc-team-won" : ""}`}
+      disabled={disabled}
+      onClick={onClick}
+      type="button"
+    >
+      <span className="flex min-w-0 items-center gap-1.5">
+        {active ? (
+          champion ? (
+            <Crown className="h-4 w-4 shrink-0 text-[var(--gold-500)]" />
+          ) : (
+            <CheckCircle2 className="h-4 w-4 shrink-0 text-[var(--pitch-600)]" />
+          )
+        ) : null}
+        <span className="min-w-0 truncate">{team?.name ?? "Pendiente"}</span>
+      </span>
+      {team?.seed ? <span className="wc-seed">{team.seed}</span> : null}
+    </button>
+  );
+}
+
+function ScheduleEditor({
+  categoryId,
+  drawSet,
+  manualScheduleOverrides,
+  onClearSchedule,
+  onRecalculateKeepingManual,
+  onResetManualSchedule,
+  onUpdateManualSchedule,
+  scheduleConfig,
+  schedule,
+}: {
+  categoryId: string;
+  drawSet: CategoryDrawSet;
+  manualScheduleOverrides: ManualScheduleMap;
+  onClearSchedule: (categoryId: string) => void;
+  onRecalculateKeepingManual: () => void;
   onResetManualSchedule: (scheduleKey: string) => void;
   onUpdateManualSchedule: (
     scheduleKey: string,
     override: ManualScheduleOverride,
   ) => void;
-  onUpdatePair: (
-    categoryId: string,
-    pairId: string,
-    patch: Partial<
-      Pick<Pair, "comment" | "playerOne" | "playerTwo" | "restriction" | "seed">
-    >,
-  ) => void;
+  scheduleConfig: TournamentScheduleConfig;
   schedule: Record<string, ScheduleAssignment>;
 }) {
-  const editableMatches = editableMatchesFromDrawSet(category.id, drawSet);
-  const bracketPairSlots = firstRoundPairSlots(category);
-  const [showBracketEditor, setShowBracketEditor] = useState(false);
-  const [draftScheduleOverrides, setDraftScheduleOverrides] =
-    useState<ManualScheduleMap>({});
-  const [dirtyScheduleKeys, setDirtyScheduleKeys] = useState<Set<string>>(
-    () => new Set(),
-  );
-  const categorySchedulePrefix = `${category.id}::`;
-  const dirtyKeysForCategory = Array.from(dirtyScheduleKeys).filter((key) =>
-    key.startsWith(categorySchedulePrefix),
-  );
-  const pendingScheduleCount = dirtyKeysForCategory.length;
+  const editableMatches = [
+    ...drawSet.mainDraw.rounds.flatMap((round) =>
+      round.matches.filter(matchNeedsSchedule).map((match) => ({
+        drawName: "Principal",
+        match,
+        roundName: round.name,
+      })),
+    ),
+    ...drawSet.consolationDraw.rounds.flatMap((round) =>
+      round.matches.filter(matchNeedsSchedule).map((match) => ({
+        drawName: "Consolacion",
+        match,
+        roundName: round.name,
+      })),
+    ),
+  ];
+  const [drafts, setDrafts] = useState<ManualScheduleMap>({});
+  const [dirtyKeys, setDirtyKeys] = useState<Set<string>>(() => new Set());
+  const pendingCount = dirtyKeys.size;
 
-  function savedScheduleValue(scheduleKey: string) {
+  function selectedValue(scheduleKey: string) {
+    if (dirtyKeys.has(scheduleKey) && drafts[scheduleKey])
+      return drafts[scheduleKey];
+
     return scheduleToManualOverride(
       manualScheduleOverrides[scheduleKey]
         ? manualOverrideToAssignment(manualScheduleOverrides[scheduleKey])
@@ -2299,66 +2054,77 @@ function TournamentEditPanel({
     );
   }
 
-  function selectedScheduleValue(scheduleKey: string) {
-    if (dirtyScheduleKeys.has(scheduleKey) && draftScheduleOverrides[scheduleKey]) {
-      return draftScheduleOverrides[scheduleKey];
+  function updateDraft(
+    scheduleKey: string,
+    patch: Partial<ManualScheduleOverride>,
+  ) {
+    const current = selectedValue(scheduleKey);
+    const nextDay = patch.day ?? current.day;
+    const times = timeOptionsForDay(nextDay, scheduleConfig);
+    const nextTime =
+      patch.time && times.includes(patch.time)
+        ? patch.time
+        : times.includes(current.time)
+          ? current.time
+          : times[0] ?? current.time;
+
+    setDrafts((currentDrafts) => ({
+      ...currentDrafts,
+      [scheduleKey]: {
+        court: patch.court ?? current.court,
+        day: nextDay,
+        time: nextTime,
+      },
+    }));
+    setDirtyKeys((currentDirty) => new Set(currentDirty).add(scheduleKey));
+  }
+
+  function saveOne(scheduleKey: string) {
+    const draft = drafts[scheduleKey];
+
+    if (!draft) return;
+
+    onUpdateManualSchedule(scheduleKey, draft);
+    setDrafts((currentDrafts) => {
+      const next = { ...currentDrafts };
+
+      delete next[scheduleKey];
+
+      return next;
+    });
+    setDirtyKeys((currentDirty) => {
+      const next = new Set(currentDirty);
+
+      next.delete(scheduleKey);
+
+      return next;
+    });
+  }
+
+  function saveAll() {
+    Array.from(dirtyKeys).forEach(saveOne);
+  }
+
+  function recalculateWithManual() {
+    if (dirtyKeys.size) {
+      saveAll();
+      return;
     }
 
-    return savedScheduleValue(scheduleKey);
+    onRecalculateKeepingManual();
   }
 
-  function clearDraftSchedulesForCategory() {
-    setDraftScheduleOverrides((current) => {
-      const next = { ...current };
-
-      Object.keys(next).forEach((key) => {
-        if (key.startsWith(categorySchedulePrefix)) delete next[key];
-      });
-
-      return next;
-    });
-    setDirtyScheduleKeys((current) => {
-      const next = new Set(current);
-
-      next.forEach((key) => {
-        if (key.startsWith(categorySchedulePrefix)) next.delete(key);
-      });
-
-      return next;
-    });
-  }
-
-  function savePendingSchedules() {
-    dirtyKeysForCategory.forEach((scheduleKey) => {
-      const draft = draftScheduleOverrides[scheduleKey];
-
-      if (draft) onUpdateManualSchedule(scheduleKey, draft);
-    });
-
-    clearDraftSchedulesForCategory();
-  }
-
-  function recalculateCategorySchedule() {
-    clearDraftSchedulesForCategory();
-    onClearCategorySchedule(category.id);
-  }
-
-  function randomizeBracketWithSchedules() {
-    clearDraftSchedulesForCategory();
-    onRandomizeBracket(category.id);
-  }
-
-  function resetScheduleRow(scheduleKey: string) {
-    if (dirtyScheduleKeys.has(scheduleKey)) {
-      setDraftScheduleOverrides((current) => {
-        const next = { ...current };
+  function resetRow(scheduleKey: string) {
+    if (dirtyKeys.has(scheduleKey)) {
+      setDrafts((currentDrafts) => {
+        const next = { ...currentDrafts };
 
         delete next[scheduleKey];
 
         return next;
       });
-      setDirtyScheduleKeys((current) => {
-        const next = new Set(current);
+      setDirtyKeys((currentDirty) => {
+        const next = new Set(currentDirty);
 
         next.delete(scheduleKey);
 
@@ -2370,397 +2136,217 @@ function TournamentEditPanel({
     onResetManualSchedule(scheduleKey);
   }
 
-  function updateScheduleValue(
-    scheduleKey: string,
-    next: Partial<ManualScheduleOverride>,
-  ) {
-    const current = selectedScheduleValue(scheduleKey);
-    const nextDay = next.day ?? current.day;
-    const dayTimes = timeOptionsForDay(nextDay);
-    const nextTime =
-      next.time && dayTimes.includes(next.time)
-        ? next.time
-        : dayTimes.includes(current.time)
-          ? current.time
-          : dayTimes[0];
-
-    setDraftScheduleOverrides((currentDrafts) => ({
-      ...currentDrafts,
-      [scheduleKey]: {
-        court: next.court ?? current.court,
-        day: nextDay,
-        time: nextTime,
-      },
-    }));
-    setDirtyScheduleKeys((currentDirty) => {
-      const updated = new Set(currentDirty);
-
-      updated.add(scheduleKey);
-
-      return updated;
-    });
-  }
-
-  function saveScheduleRow(scheduleKey: string) {
-    const draft = draftScheduleOverrides[scheduleKey];
-
-    if (!draft) return;
-
-    onUpdateManualSchedule(scheduleKey, draft);
-    setDraftScheduleOverrides((currentDrafts) => {
-      const updated = { ...currentDrafts };
-
-      delete updated[scheduleKey];
-
-      return updated;
-    });
-    setDirtyScheduleKeys((currentDirty) => {
-      const updated = new Set(currentDirty);
-
-      updated.delete(scheduleKey);
-
-      return updated;
-    });
+  function resetAuto() {
+    setDrafts({});
+    setDirtyKeys(new Set());
+    onClearSchedule(categoryId);
   }
 
   return (
-    <section className="rounded-xl border border-black/10 bg-white p-4 shadow-sm">
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+    <section className="wc-card wc-accent-top p-4 sm:p-5">
+      <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div>
-          <p className="text-xs font-bold uppercase tracking-[0.22em] text-[#0f6b4b]">
-            Edicion manual
-          </p>
-          <h2 className="mt-1 text-2xl font-black">{category.name}</h2>
-          <p className="mt-1 text-sm font-semibold text-black/55">
-            Ajusta parejas, restricciones y horarios antes de publicar.
+          <p className="wc-eyebrow">Calendario</p>
+          <h2 className="wc-title mt-0.5 text-xl">Horarios del cuadro</h2>
+          <p className="mt-1 text-sm font-medium text-[var(--ink-soft)]">
+            Los horarios bloqueados se fuerzan y el resto se recalcula alrededor.
           </p>
         </div>
-        <button
-          className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-[#111816] px-4 text-sm font-bold text-white transition hover:bg-black"
-          onClick={() => onAddPair(category.id)}
-          type="button"
-        >
-          <Plus className="h-4 w-4" />
-          Anadir pareja
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button
+            className="wc-btn wc-btn-primary wc-btn-sm"
+            onClick={recalculateWithManual}
+            type="button"
+          >
+            <RotateCcw className="h-4 w-4" />
+            {pendingCount
+              ? "Bloquear cambios y recalcular"
+              : "Recalcular con candados"}
+            {pendingCount ? ` (${pendingCount})` : ""}
+          </button>
+          <button
+            className="wc-btn wc-btn-ghost wc-btn-sm"
+            onClick={resetAuto}
+            type="button"
+          >
+            <RotateCcw className="h-4 w-4" />
+            Restaurar horarios auto
+          </button>
+        </div>
       </div>
 
-      <div className="mt-5 rounded-xl border border-[#0f6b4b]/20 bg-[#f7f7f3] p-3">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <h3 className="text-sm font-black uppercase tracking-[0.18em] text-[#0b553b]">
-              Emparejamientos
-            </h3>
-            <p className="mt-1 text-sm font-semibold text-black/55">
-              Cambia las parejas de sitio en la primera ronda del cuadro.
-            </p>
-          </div>
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <button
-              className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-[#0f6b4b] px-4 text-sm font-bold text-white transition hover:bg-[#11835b]"
-              onClick={randomizeBracketWithSchedules}
-              type="button"
-            >
-              <RotateCcw className="h-4 w-4" />
-              Random con horarios
-            </button>
-            <button
-              className="inline-flex h-10 items-center justify-center rounded-lg border border-black/10 bg-white px-4 text-sm font-bold transition hover:border-[#0f6b4b]"
-              onClick={() => setShowBracketEditor((current) => !current)}
-              type="button"
-            >
-              {showBracketEditor ? "Ocultar" : "Cambiar brackets a mano"}
-            </button>
-          </div>
-        </div>
+      <div className="grid gap-2.5">
+        {editableMatches.map(({ drawName, match, roundName }) => {
+          const key = matchScheduleKey(categoryId, match);
+          const manual = manualScheduleOverrides[key];
+          const hasDraft = dirtyKeys.has(key);
+          const current = selectedValue(key);
+          const dayTimes = timeOptionsForDay(current.day, scheduleConfig);
+          const times = dayTimes.includes(current.time)
+            ? dayTimes
+            : [current.time, ...dayTimes];
+          const locked = Boolean(manual);
 
-        {showBracketEditor ? (
-          <div className="mt-4 grid gap-3 lg:grid-cols-2">
-            {bracketPairSlots.map((slot) => (
-              <div
-                className="rounded-lg border border-black/10 bg-white p-3"
-                key={slot.matchLabel}
-              >
-                <p className="mb-3 text-xs font-black uppercase tracking-[0.16em] text-black/45">
-                  {slot.matchLabel}
-                </p>
-                <div className="grid gap-2">
-                  <BracketSlotSelect
-                    category={category}
-                    label="Pareja A"
-                    onMovePair={onMovePairInBracket}
-                    pair={slot.sideA}
-                    slotIndex={slot.sideAIndex}
-                  />
-                  <BracketSlotSelect
-                    category={category}
-                    label="Pareja B"
-                    onMovePair={onMovePairInBracket}
-                    pair={slot.sideB}
-                    slotIndex={slot.sideBIndex}
-                  />
+          return (
+            <article
+              className={`rounded-xl border p-3 ${
+                schedule[key]?.conflict
+                  ? "border-[var(--amber-500)] bg-[var(--amber-50)]"
+                  : hasDraft
+                    ? "border-[var(--pitch-600)] bg-[var(--pitch-50)]"
+                    : "border-[var(--line)] bg-[var(--surface-2)]"
+              }`}
+              key={key}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="font-display text-xs font-semibold uppercase tracking-[0.14em] text-[var(--ink-faint)]">
+                    {drawName} · {roundName} · {match.id}
+                  </p>
+                  <p className="mt-1 line-clamp-2 text-sm font-bold">
+                    {matchTeamsLabel(match)}
+                  </p>
                 </div>
-              </div>
-            ))}
-          </div>
-        ) : null}
-      </div>
-
-      <div className="mt-5 grid gap-6 xl:grid-cols-[minmax(0,1.15fr)_minmax(420px,0.85fr)]">
-        <div className="min-w-0">
-          <div className="mb-3 flex items-center justify-between gap-3">
-            <h3 className="text-sm font-black uppercase tracking-[0.18em] text-black/45">
-              Parejas
-            </h3>
-          </div>
-
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[900px] border-collapse text-sm">
-              <thead>
-                <tr className="bg-[#f7f7f3] text-left text-xs uppercase tracking-[0.14em] text-black/45">
-                  <th className="px-3 py-3 font-black">#</th>
-                  <th className="px-3 py-3 font-black">Jugador 1</th>
-                  <th className="px-3 py-3 font-black">Jugador 2</th>
-                  <th className="px-3 py-3 font-black">Restriccion</th>
-                  <th className="px-3 py-3 font-black">Comentario</th>
-                  <th className="px-3 py-3 font-black">Quitar</th>
-                </tr>
-              </thead>
-              <tbody>
-                {category.pairs.map((pair) => (
-                  <tr className="border-b border-black/10" key={pair.id}>
-                    <td className="px-3 py-2">
-                      <input
-                        className="h-9 w-14 rounded-lg border border-black/10 bg-white px-2 text-sm font-bold outline-none focus:border-[#0f6b4b]"
-                        min={1}
-                        onChange={(event) =>
-                          onUpdatePair(category.id, pair.id, {
-                            seed:
-                              Number.parseInt(event.target.value, 10) ||
-                              pair.seed,
-                          })
-                        }
-                        type="number"
-                        value={pair.seed}
-                      />
-                    </td>
-                    <td className="px-3 py-2">
-                      <input
-                        className="h-9 w-full rounded-lg border border-black/10 bg-white px-3 text-sm font-bold outline-none focus:border-[#0f6b4b]"
-                        onBlur={(event) =>
-                          onUpdatePair(category.id, pair.id, {
-                            playerOne: properCaseName(event.target.value),
-                          })
-                        }
-                        onChange={(event) =>
-                          onUpdatePair(category.id, pair.id, {
-                            playerOne: event.target.value,
-                          })
-                        }
-                        value={pair.playerOne}
-                      />
-                    </td>
-                    <td className="px-3 py-2">
-                      <input
-                        className="h-9 w-full rounded-lg border border-black/10 bg-white px-3 text-sm font-bold outline-none focus:border-[#0f6b4b]"
-                        onBlur={(event) =>
-                          onUpdatePair(category.id, pair.id, {
-                            playerTwo: properCaseName(event.target.value),
-                          })
-                        }
-                        onChange={(event) =>
-                          onUpdatePair(category.id, pair.id, {
-                            playerTwo: event.target.value,
-                          })
-                        }
-                        value={pair.playerTwo}
-                      />
-                    </td>
-                    <td className="px-3 py-2">
-                      <input
-                        className="h-9 w-full rounded-lg border border-black/10 bg-white px-3 text-sm outline-none focus:border-[#0f6b4b]"
-                        onChange={(event) =>
-                          onUpdatePair(category.id, pair.id, {
-                            restriction: event.target.value,
-                          })
-                        }
-                        value={pair.restriction}
-                      />
-                    </td>
-                    <td className="px-3 py-2">
-                      <input
-                        className="h-9 w-full rounded-lg border border-black/10 bg-white px-3 text-sm outline-none focus:border-[#0f6b4b]"
-                        onChange={(event) =>
-                          onUpdatePair(category.id, pair.id, {
-                            comment: event.target.value,
-                          })
-                        }
-                        value={pair.comment}
-                      />
-                    </td>
-                    <td className="px-3 py-2">
-                      <button
-                        className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-black/10 text-black/55 transition hover:border-red-300 hover:bg-red-50 hover:text-red-700"
-                        onClick={() => onRemovePair(category.id, pair.id)}
-                        type="button"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <div className="min-w-0">
-          <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <h3 className="text-sm font-black uppercase tracking-[0.18em] text-black/45">
-              Horarios
-            </h3>
-            <div className="flex flex-wrap gap-2">
-              <button
-                className="inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-[#0f6b4b] px-3 text-sm font-bold text-white transition hover:bg-[#11835b] disabled:cursor-not-allowed disabled:opacity-40"
-                disabled={!pendingScheduleCount}
-                onClick={savePendingSchedules}
-                type="button"
-              >
-                <Save className="h-4 w-4" />
-                Guardar cambios
-                {pendingScheduleCount ? ` (${pendingScheduleCount})` : ""}
-              </button>
-              <button
-                className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-black/10 px-3 text-sm font-bold transition hover:border-[#0f6b4b]"
-                onClick={recalculateCategorySchedule}
-                type="button"
-              >
-                <RotateCcw className="h-4 w-4" />
-                Recalcular auto
-              </button>
-            </div>
-          </div>
-
-          <div className="grid max-h-[560px] gap-3 overflow-auto pr-1">
-            {editableMatches.map(({ drawName, match, roundName, scheduleKey }) => {
-              const currentSchedule = schedule[scheduleKey];
-              const manualOverride = manualScheduleOverrides[scheduleKey];
-              const hasPendingSchedule = dirtyScheduleKeys.has(scheduleKey);
-              const currentValue = selectedScheduleValue(scheduleKey);
-              const timeOptions = timeOptionsForDay(currentValue.day);
-
-              return (
-                <div
-                  className={`rounded-lg border p-3 ${
-                    currentSchedule?.conflict
-                      ? "border-amber-300 bg-amber-50"
-                      : hasPendingSchedule
-                        ? "border-[#0f6b4b]/40 bg-[#eff8f4]"
-                      : "border-black/10 bg-[#fbfbf8]"
+                <span
+                  className={`wc-chip shrink-0 ${
+                    hasDraft
+                      ? "wc-chip-green"
+                      : locked
+                        ? "wc-chip-gold"
+                        : "wc-chip-neutral"
                   }`}
-                  key={scheduleKey}
                 >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="text-xs font-black uppercase tracking-[0.14em] text-black/45">
-                        {drawName} · {roundName} · {match.id}
-                      </p>
-                      <p className="mt-1 line-clamp-2 text-sm font-black">
-                        {matchTeamsLabel(match)}
-                      </p>
-                    </div>
-                    <span
-                      className={`shrink-0 rounded px-2 py-1 text-xs font-black ${
-                        hasPendingSchedule
-                          ? "bg-[#d8efe6] text-[#0b553b]"
-                          : manualOverride
-                          ? "bg-[#fff3d6] text-[#7a5818]"
-                          : "bg-[#e8f3ee] text-[#0b553b]"
-                      }`}
-                    >
-                      {hasPendingSchedule
-                        ? "Pendiente"
-                        : manualOverride
-                          ? "Manual"
-                          : "Auto"}
-                    </span>
-                  </div>
+                  {hasDraft ? "Pendiente" : locked ? "Bloqueado" : "Auto"}
+                </span>
+              </div>
 
-                  <div className="mt-3 grid grid-cols-[1fr_1fr_84px_auto_auto] gap-2">
-                    <select
-                      className="h-9 rounded-lg border border-black/10 bg-white px-2 text-sm font-bold outline-none focus:border-[#0f6b4b]"
-                      onChange={(event) =>
-                        updateScheduleValue(scheduleKey, {
-                          day: event.target.value as DayKey,
-                        })
-                      }
-                      value={currentValue.day}
-                    >
-                      {scheduleDayOptions.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-
-                    <select
-                      className="h-9 rounded-lg border border-black/10 bg-white px-2 text-sm font-bold outline-none focus:border-[#0f6b4b]"
-                      onChange={(event) =>
-                        updateScheduleValue(scheduleKey, {
-                          time: event.target.value,
-                        })
-                      }
-                      value={currentValue.time}
-                    >
-                      {timeOptions.map((time) => (
-                        <option key={time} value={time}>
-                          {time}
-                        </option>
-                      ))}
-                    </select>
-
-                    <select
-                      className="h-9 rounded-lg border border-black/10 bg-white px-2 text-sm font-bold outline-none focus:border-[#0f6b4b]"
-                      onChange={(event) =>
-                        updateScheduleValue(scheduleKey, {
-                          court: Number.parseInt(event.target.value, 10),
-                        })
-                      }
-                      value={currentValue.court}
-                    >
-                      {courtOptions.map((court) => (
-                        <option key={court} value={court}>
-                          P{court}
-                        </option>
-                      ))}
-                    </select>
-
-                    <button
-                      className="inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-[#0f6b4b] px-3 text-sm font-bold text-white transition hover:bg-[#11835b] disabled:cursor-not-allowed disabled:opacity-35"
-                      disabled={!hasPendingSchedule}
-                      onClick={() => saveScheduleRow(scheduleKey)}
-                      type="button"
-                    >
-                      <Save className="h-4 w-4" />
-                      Guardar
-                    </button>
-
-                    <button
-                      className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-black/10 text-black/55 transition hover:border-[#0f6b4b] hover:text-[#0f6b4b] disabled:cursor-not-allowed disabled:opacity-35"
-                      disabled={!manualOverride && !hasPendingSchedule}
-                      onClick={() => resetScheduleRow(scheduleKey)}
-                      type="button"
-                    >
-                      <RotateCcw className="h-4 w-4" />
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
+              <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_1fr_84px_auto_auto]">
+                <select
+                  className="wc-field h-9"
+                  onChange={(event) =>
+                    updateDraft(key, { day: event.target.value as DayKey })
+                  }
+                  value={current.day}
+                >
+                  {dayOptions.map((day) => (
+                    <option key={day.key} value={day.key}>
+                      {day.label}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  className="wc-field h-9 tabular"
+                  onChange={(event) =>
+                    updateDraft(key, { time: event.target.value })
+                  }
+                  value={current.time}
+                >
+                  {times.map((time) => (
+                    <option key={time} value={time}>
+                      {time}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  className="wc-field h-9 tabular"
+                  onChange={(event) =>
+                    updateDraft(key, {
+                      court: Number.parseInt(event.target.value, 10),
+                    })
+                  }
+                  value={current.court}
+                >
+                  {Array.from(
+                    { length: courtCount },
+                    (_, index) => index + 1,
+                  ).map((court) => (
+                    <option key={court} value={court}>
+                      P{court}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  className={`wc-btn wc-btn-sm ${
+                    locked && !hasDraft ? "wc-btn-ghost" : "wc-btn-primary"
+                  }`}
+                  disabled={!hasDraft && !locked}
+                  onClick={() =>
+                    locked && !hasDraft ? resetRow(key) : saveOne(key)
+                  }
+                  type="button"
+                >
+                  {locked && !hasDraft ? (
+                    <LockOpen className="h-4 w-4" />
+                  ) : (
+                    <LockKeyhole className="h-4 w-4" />
+                  )}
+                  {locked && !hasDraft ? "Desbloquear" : "Bloquear"}
+                </button>
+                <button
+                  className="wc-icon-btn h-9 w-9"
+                  disabled={!hasDraft}
+                  onClick={() => resetRow(key)}
+                  title="Descartar cambio"
+                  type="button"
+                >
+                  <RotateCcw className="h-4 w-4" />
+                </button>
+              </div>
+            </article>
+          );
+        })}
       </div>
     </section>
+  );
+}
+
+function PublicAdminPanel({
+  copied,
+  onCopy,
+  onPublish,
+  publicPath,
+  publicUrl,
+  published,
+  rows,
+}: {
+  copied: boolean;
+  onCopy: () => void;
+  onPublish: () => void;
+  publicPath: string;
+  publicUrl: string;
+  published: boolean;
+  rows: ScheduleSummaryRow[];
+}) {
+  return (
+    <div className="grid gap-5">
+      <section className="wc-card wc-accent-top p-4 sm:p-5">
+        <div className="flex items-start gap-3">
+          <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-[var(--pitch-900)] text-[var(--gold-300)]">
+            <Globe2 className="h-6 w-6" />
+          </span>
+          <div>
+            <p className="wc-eyebrow">Salida publica</p>
+            <h2 className="wc-title mt-0.5 text-2xl">
+              Horarios y enlace del torneo
+            </h2>
+            <p className="mt-1 max-w-3xl text-sm font-medium text-[var(--ink-soft)]">
+              Esta es la vista preparada para jugadores y publico: fixture,
+              pistas, categorias y link para abrir en otra pestana.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <PublishPanel
+        copied={copied}
+        onCopy={onCopy}
+        onPublish={onPublish}
+        publicPath={publicPath}
+        publicUrl={publicUrl}
+        published={published}
+      />
+      <PublicSchedulePanel rows={rows} />
+    </div>
   );
 }
 
@@ -2780,485 +2366,54 @@ function PublishPanel({
   published: boolean;
 }) {
   return (
-    <section className="rounded-xl border border-[#0f6b4b]/20 bg-white p-4 shadow-sm">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+    <section className="wc-card-flat p-4 sm:p-5">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div>
-          <p className="text-xs font-bold uppercase tracking-[0.22em] text-[#0f6b4b]">
-            Panel admin
-          </p>
-          <h2 className="mt-1 text-xl font-black">
-            {published ? "Cuadro publicado" : "Publica cuando este listo"}
+          <div className="flex items-center gap-2">
+            <p className="wc-eyebrow">Publicacion</p>
+            {published ? (
+              <span className="wc-chip wc-chip-green">
+                <CheckCircle2 className="h-3.5 w-3.5" />
+                En vivo
+              </span>
+            ) : null}
+          </div>
+          <h2 className="wc-title mt-0.5 text-xl">
+            {published ? "Cuadro publico listo" : "Publicar cuadro"}
           </h2>
-          <p className="mt-1 text-sm font-semibold text-black/55">
-            Desde este panel puedes seguir marcando ganadores; el enlace publico
-            se actualiza con tus cambios.
+          <p className="mt-1 text-sm font-medium text-[var(--ink-soft)]">
+            Mientras usemos localStorage, el enlace publico funciona en este
+            navegador. Para Vercel real necesitaremos base de datos.
           </p>
         </div>
-
-        <div className="flex flex-col gap-2 sm:flex-row">
+        <div className="flex flex-wrap gap-2">
+          <button className="wc-btn wc-btn-dark" onClick={onPublish} type="button">
+            <Share2 className="h-4 w-4" />
+            {published ? "Actualizar publico" : "Publicar"}
+          </button>
           <button
-            className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-[#0f6b4b] px-4 text-sm font-bold text-white transition hover:bg-[#11835b]"
-            onClick={onPublish}
+            className="wc-btn wc-btn-ghost"
+            disabled={!publicUrl}
+            onClick={onCopy}
             type="button"
           >
-            <Share2 className="h-4 w-4" />
-            {published ? "Actualizar publico" : "Publicar cuadro"}
+            <Copy className="h-4 w-4" />
+            {copied ? "Copiado" : "Copiar enlace"}
           </button>
-          {published ? (
+          {publicPath ? (
             <a
-              className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-black/10 px-4 text-sm font-bold text-[#111816] transition hover:border-[#0f6b4b]"
+              className="wc-btn wc-btn-ghost"
               href={publicPath}
               rel="noreferrer"
               target="_blank"
             >
               <ExternalLink className="h-4 w-4" />
-              Abrir
+              Ver publico
             </a>
           ) : null}
         </div>
       </div>
-
-      {published ? (
-        <div className="mt-4 flex flex-col gap-2 rounded-lg bg-[#f7f7f3] p-3 sm:flex-row sm:items-center">
-          <code className="min-w-0 flex-1 truncate text-sm font-bold text-[#0b553b]">
-            {publicUrl}
-          </code>
-          <button
-            className="inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-[#111816] px-3 text-sm font-bold text-white transition hover:bg-black"
-            onClick={onCopy}
-            type="button"
-          >
-            <Copy className="h-4 w-4" />
-            {copied ? "Copiado" : "Copiar"}
-          </button>
-        </div>
-      ) : null}
     </section>
-  );
-}
-
-function BracketSlotSelect({
-  category,
-  label,
-  onMovePair,
-  pair,
-  slotIndex,
-}: {
-  category: CategoryData;
-  label: string;
-  onMovePair: (categoryId: string, slotIndex: number, pairId: string) => void;
-  pair: Pair | null;
-  slotIndex: number;
-}) {
-  return (
-    <label className="grid gap-1">
-      <span className="text-xs font-black uppercase tracking-[0.14em] text-black/45">
-        {label}
-      </span>
-      {pair ? (
-        <select
-          className="h-10 rounded-lg border border-black/10 bg-[#fbfbf8] px-3 text-sm font-bold outline-none transition focus:border-[#0f6b4b]"
-          onChange={(event) =>
-            onMovePair(category.id, slotIndex, event.target.value)
-          }
-          value={pair.id}
-        >
-          {category.pairs.map((option) => (
-            <option key={option.id} value={option.id}>
-              {option.seed}. {pairName(option)}
-            </option>
-          ))}
-        </select>
-      ) : (
-        <div className="flex h-10 items-center rounded-lg border border-dashed border-black/15 bg-black/[0.03] px-3 text-sm font-black text-black/35">
-          BYE
-        </div>
-      )}
-    </label>
-  );
-}
-
-function PreviewPanel({
-  activeCategory,
-  categories,
-  onCancel,
-  onSelect,
-  onValidate,
-  selectedId,
-}: {
-  activeCategory?: CategoryData;
-  categories: CategoryData[];
-  onCancel: () => void;
-  onSelect: (id: string) => void;
-  onValidate: () => void;
-  selectedId: string;
-}) {
-  const rows = activeCategory?.pairs.slice(0, previewLimit) ?? [];
-
-  return (
-    <section className="rounded-xl border-2 border-[#c59b45] bg-white p-4 shadow-lg shadow-[#c59b45]/10">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div>
-          <p className="text-xs font-bold uppercase tracking-[0.22em] text-[#9b7732]">
-            Previsualizacion
-          </p>
-          <h2 className="mt-1 text-2xl font-black text-[#111816]">
-            Asi se va a subir
-          </h2>
-        </div>
-
-        <div className="flex flex-wrap gap-2">
-          <button
-            className="inline-flex h-10 items-center justify-center rounded-lg border border-black/10 px-4 text-sm font-bold transition hover:border-black/30"
-            onClick={onCancel}
-            type="button"
-          >
-            Cancelar
-          </button>
-          <button
-            className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-[#0f6b4b] px-4 text-sm font-bold text-white transition hover:bg-[#0b553b]"
-            onClick={onValidate}
-            type="button"
-          >
-            <CheckCircle2 className="h-4 w-4" />
-            Validar y crear cuadros
-          </button>
-        </div>
-      </div>
-
-      <div className="mt-4 flex flex-wrap gap-2">
-        {categories.map((category) => (
-          <button
-            className={`rounded-lg border px-3 py-2 text-sm font-bold transition ${
-              category.id === selectedId
-                ? "border-[#c59b45] bg-[#fff3d6] text-[#111816]"
-                : "border-black/10 bg-[#f7f7f3] text-[#111816] hover:border-[#c59b45]"
-            }`}
-            key={category.id}
-            onClick={() => onSelect(category.id)}
-            type="button"
-          >
-            {category.name}
-            <span className="ml-2 text-xs opacity-70">
-              {category.pairs.length}
-            </span>
-          </button>
-        ))}
-      </div>
-
-      {activeCategory?.warnings.length ? (
-        <div className="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
-          {activeCategory.warnings.slice(0, 4).map((warning) => (
-            <p key={warning}>{warning}</p>
-          ))}
-        </div>
-      ) : null}
-
-      <div className="mt-4 overflow-x-auto">
-        <table className="w-full min-w-[780px] border-collapse text-left text-sm">
-          <thead>
-            <tr className="bg-[#07110d] text-white">
-              <th className="px-3 py-3 font-bold">#</th>
-              <th className="px-3 py-3 font-bold">Columna B</th>
-              <th className="px-3 py-3 font-bold">Columna C</th>
-              <th className="px-3 py-3 font-bold">Restriccion D</th>
-              <th className="px-3 py-3 font-bold">Comentario E</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((pair) => (
-              <tr className="border-b border-black/10" key={pair.id}>
-                <td className="px-3 py-3 font-bold">{pair.seed}</td>
-                <td className="px-3 py-3">{pair.playerOne}</td>
-                <td className="px-3 py-3">{pair.playerTwo}</td>
-                <td className="px-3 py-3 text-[#0f6b4b]">
-                  {pair.restriction || "-"}
-                </td>
-                <td className="px-3 py-3 text-black/60">
-                  {pair.comment || "-"}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      {(activeCategory?.pairs.length ?? 0) > previewLimit ? (
-        <p className="mt-3 text-sm font-semibold text-black/60">
-          Mostrando {previewLimit} de {activeCategory?.pairs.length} parejas.
-        </p>
-      ) : null}
-    </section>
-  );
-}
-
-function BracketBoard({
-  categoryId,
-  draw,
-  emptyText,
-  onPick,
-  readOnly = false,
-  schedule,
-  subtitle,
-}: {
-  categoryId: string;
-  draw: Draw;
-  emptyText?: string;
-  onPick?: (match: Match, team: Team) => void;
-  readOnly?: boolean;
-  schedule: Record<string, ScheduleAssignment>;
-  subtitle: string;
-}) {
-  const isMain = draw.accent === "main";
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const boardId = `bracket-${draw.accent}-${domSlug(draw.title)}`;
-
-  function scrollToRound(roundIndex: number) {
-    const container = scrollRef.current;
-    const target = document.getElementById(`${boardId}-${roundIndex}`);
-
-    if (!container || !target) return;
-
-    const scrollLeft =
-      target.getBoundingClientRect().left -
-      container.getBoundingClientRect().left +
-      container.scrollLeft;
-
-    container.scrollTo({
-      behavior: "smooth",
-      left: scrollLeft,
-    });
-  }
-
-  return (
-    <section className="min-w-0 rounded-xl border border-black/10 bg-white p-4 shadow-sm">
-      <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <p
-            className={`text-xs font-bold uppercase tracking-[0.22em] ${
-              isMain ? "text-[#0f6b4b]" : "text-[#9b7732]"
-            }`}
-          >
-            {isMain ? "Principal" : "Segunda oportunidad"}
-          </p>
-          <h2 className="mt-1 text-2xl font-black">{draw.title}</h2>
-          <p className="mt-1 text-sm font-semibold text-black/55">{subtitle}</p>
-        </div>
-      </div>
-
-      {!draw.rounds.length ? (
-        <div className="rounded-lg border border-dashed border-black/20 bg-[#f7f7f3] p-8 text-center text-sm font-bold text-black/50">
-          {emptyText || "Todavia no hay suficientes parejas."}
-        </div>
-      ) : (
-        <>
-          <div className="mb-3 flex gap-2 overflow-x-auto pb-1 md:hidden">
-            {draw.rounds.map((round, roundIndex) => (
-              <button
-                className={`shrink-0 rounded-lg px-3 py-2 text-sm font-black ${
-                  isMain
-                    ? "bg-[#e8f3ee] text-[#0b553b]"
-                    : "bg-[#fff3d6] text-[#7a5818]"
-                }`}
-                key={round.name}
-                onClick={() => scrollToRound(roundIndex)}
-                type="button"
-              >
-                {round.name}
-              </button>
-            ))}
-          </div>
-
-          <div
-            className="max-h-[72vh] touch-pan-x overflow-auto overscroll-contain rounded-xl bg-[#f7f7f3] p-2 pb-3 md:max-h-none md:overflow-x-auto md:rounded-none md:bg-transparent md:p-0 md:pb-2"
-            ref={scrollRef}
-          >
-          <div className="flex min-w-max snap-x snap-mandatory gap-4 pr-8 md:snap-none md:gap-10">
-            {draw.rounds.map((round, roundIndex) => (
-              <div
-                className="flex w-[300px] shrink-0 snap-start flex-col gap-3 md:w-[280px]"
-                id={`${boardId}-${roundIndex}`}
-                key={round.name}
-              >
-                <div
-                  className={`rounded-lg px-3 py-2 text-sm font-black ${
-                    isMain
-                      ? "bg-[#e8f3ee] text-[#0b553b]"
-                      : "bg-[#fff3d6] text-[#7a5818]"
-                  }`}
-                >
-                  {round.name}
-                </div>
-
-                <div
-                  className="flex flex-col gap-4 pt-0 md:gap-[var(--round-gap)] md:pt-[var(--round-padding)]"
-                  style={bracketRoundStyle(roundIndex)}
-                >
-                  {round.matches.map((match, matchIndex) => (
-                    <MatchCard
-                      accent={draw.accent}
-                      hasSourceConnector={roundIndex < draw.rounds.length - 1}
-                      hasTargetConnector={roundIndex > 0}
-                      key={match.id}
-                      match={match}
-                      onPick={onPick}
-                      readOnly={readOnly}
-                      schedule={schedule[matchScheduleKey(categoryId, match.id)]}
-                      sourceSide={matchIndex % 2 === 0 ? "top" : "bottom"}
-                    />
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-          </div>
-        </>
-      )}
-    </section>
-  );
-}
-
-function MatchCard({
-  accent,
-  hasSourceConnector,
-  hasTargetConnector,
-  match,
-  onPick,
-  readOnly,
-  schedule,
-  sourceSide,
-}: {
-  accent: Draw["accent"];
-  hasSourceConnector: boolean;
-  hasTargetConnector: boolean;
-  match: Match;
-  onPick?: (match: Match, team: Team) => void;
-  readOnly: boolean;
-  schedule?: ScheduleAssignment;
-  sourceSide: "top" | "bottom";
-}) {
-  const color =
-    accent === "main"
-      ? "border-[#0f6b4b] bg-[#0f6b4b] text-white"
-      : "border-[#c59b45] bg-[#c59b45] text-black";
-
-  return (
-    <article
-      className={`bracket-match relative rounded-xl border border-black/10 bg-[#fbfbf8] p-2 shadow-sm ${
-        hasTargetConnector ? "bracket-target" : ""
-      } ${
-        hasSourceConnector ? `bracket-source bracket-source-${sourceSide}` : ""
-      }`}
-      style={
-        {
-          "--match-height": `${bracketMatchHeight}px`,
-          height: `${bracketMatchHeight}px`,
-        } as CSSProperties
-      }
-    >
-      {hasTargetConnector ? (
-        <span
-          aria-hidden="true"
-          className="absolute left-[-20px] top-1/2 z-0 hidden w-5 border-t-2 border-[#0f6b4b]/30 md:block"
-        />
-      ) : null}
-      {hasSourceConnector ? (
-        <span
-          aria-hidden="true"
-          className="absolute right-[-20px] top-1/2 z-0 hidden w-5 border-t-2 border-[#0f6b4b]/30 md:block"
-        />
-      ) : null}
-      {hasSourceConnector && sourceSide === "top" ? (
-        <span
-          aria-hidden="true"
-          className="absolute right-[-20px] top-1/2 z-0 hidden border-l-2 border-[#0f6b4b]/30 md:block"
-          style={{ height: "calc(var(--round-gap) + var(--match-height))" }}
-        />
-      ) : null}
-      <div className="mb-2 flex items-center justify-between gap-2 px-1">
-        <span className={`rounded-md border px-2 py-1 text-xs font-black ${color}`}>
-          {match.id}
-        </span>
-        <span className="truncate text-xs font-bold uppercase tracking-[0.14em] text-black/45">
-          {match.label}
-        </span>
-      </div>
-
-      <div
-        className={`mb-2 flex h-7 items-center gap-2 rounded-lg px-2 text-xs font-black ${
-          schedule?.conflict
-            ? "bg-amber-100 text-amber-900"
-            : "bg-black/[0.04] text-black/60"
-        }`}
-      >
-        <CalendarClock className="h-3.5 w-3.5 shrink-0" />
-        <span className="truncate">{scheduleLabel(schedule)}</span>
-      </div>
-
-      <div className="grid gap-2">
-        <TeamButton
-          match={match}
-          onPick={onPick}
-          readOnly={readOnly}
-          side="A"
-          team={match.sideA}
-        />
-        <TeamButton
-          match={match}
-          onPick={onPick}
-          readOnly={readOnly}
-          side="B"
-          team={match.sideB}
-        />
-      </div>
-    </article>
-  );
-}
-
-function TeamButton({
-  match,
-  onPick,
-  readOnly,
-  side,
-  team,
-}: {
-  match: Match;
-  onPick?: (match: Match, team: Team) => void;
-  readOnly: boolean;
-  side: "A" | "B";
-  team: Team | null;
-}) {
-  const other = side === "A" ? match.sideB : match.sideA;
-  const canPick = !readOnly && Boolean(onPick) && isPlayable(team) && isPlayable(other);
-  const isWinner = team && match.winner?.id === team.id;
-  const isPlaceholder = !team || team.isPlaceholder;
-
-  return (
-    <button
-      className={`h-[54px] overflow-hidden rounded-lg border px-3 py-2 text-left transition ${
-        isWinner
-          ? "border-[#0f6b4b] bg-[#dff2e9] text-[#073d2a]"
-          : isPlaceholder
-            ? "border-black/5 bg-black/[0.03] text-black/35"
-            : "border-black/10 bg-white text-[#111816] hover:border-[#0f6b4b] hover:bg-[#f0faf5]"
-      } ${canPick ? "cursor-pointer" : "cursor-default"}`}
-      disabled={!canPick}
-      onClick={() => team && onPick?.(match, team)}
-      type="button"
-    >
-      <span className="flex items-start gap-2">
-        {team?.seed ? (
-          <span className="mt-0.5 rounded bg-black/10 px-1.5 py-0.5 text-[11px] font-black">
-            {team.seed}
-          </span>
-        ) : null}
-        <span className="min-w-0 flex-1">
-          <span className="line-clamp-2 text-sm font-black leading-5">
-            {team?.name || "BYE"}
-          </span>
-        </span>
-      </span>
-    </button>
   );
 }
 
@@ -3267,23 +2422,19 @@ function StatCard({
   label,
   value,
 }: {
-  icon: ComponentType<{ className?: string }>;
+  icon: typeof Trophy;
   label: string;
   value: number | string;
 }) {
   return (
-    <article className="rounded-xl border border-black/10 bg-white p-4 shadow-sm">
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <p className="text-xs font-bold uppercase tracking-[0.18em] text-black/45">
-            {label}
-          </p>
-          <p className="mt-1 text-3xl font-black">{value}</p>
-        </div>
-        <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-[#e8f3ee] text-[#0f6b4b]">
-          <Icon className="h-5 w-5" />
-        </div>
+    <article className="wc-stat">
+      <div>
+        <p className="wc-stat-label">{label}</p>
+        <p className="wc-stat-value mt-1.5">{value}</p>
       </div>
+      <span className="wc-stat-ico">
+        <Icon className="h-5 w-5" />
+      </span>
     </article>
   );
 }
@@ -3294,183 +2445,428 @@ function Notice({
   title,
   tone,
 }: {
-  icon: ComponentType<{ className?: string }>;
+  icon: typeof AlertTriangle;
   text: string;
   title: string;
-  tone: "warning";
+  tone: "warning" | "success";
 }) {
   return (
     <section
-      className={`flex items-start gap-3 rounded-xl border p-4 ${
-        tone === "warning"
-          ? "border-amber-300 bg-amber-50 text-amber-950"
-          : ""
+      className={`wc-notice ${
+        tone === "warning" ? "wc-notice-warning" : "wc-notice-success"
       }`}
     >
       <Icon className="mt-0.5 h-5 w-5 shrink-0" />
       <div>
-        <h2 className="font-black">{title}</h2>
-        <p className="text-sm font-semibold">{text}</p>
+        <h2 className="font-display text-sm font-bold uppercase tracking-wide">
+          {title}
+        </h2>
+        <p className="mt-0.5 text-sm font-semibold text-[var(--ink)]/80">{text}</p>
       </div>
     </section>
   );
 }
 
-function EmptyState() {
+function roundLabel(row: ScheduleSummaryRow) {
+  return row.drawName === "Consolacion"
+    ? `Consol. · ${row.roundName}`
+    : row.roundName;
+}
+
+function groupRowsByDay(rows: ScheduleSummaryRow[]) {
+  const groups: { dayLabel: string; rows: ScheduleSummaryRow[] }[] = [];
+
+  rows.forEach((row) => {
+    const last = groups[groups.length - 1];
+
+    if (last && last.dayLabel === row.dayLabel) {
+      last.rows.push(row);
+    } else {
+      groups.push({ dayLabel: row.dayLabel, rows: [row] });
+    }
+  });
+
+  return groups;
+}
+
+function ScheduleRow({ row }: { row: ScheduleSummaryRow }) {
+  const [teamA, teamB] = row.match.split(" vs ");
+
   return (
-    <section className="rounded-xl border border-dashed border-black/20 bg-white p-8 text-center shadow-sm">
-      <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-xl bg-[#e8f3ee] text-[#0f6b4b]">
-        <Upload className="h-7 w-7" />
-      </div>
-      <h2 className="mt-4 text-2xl font-black">Sube el Excel del torneo</h2>
-      <p className="mx-auto mt-2 max-w-xl text-sm font-semibold leading-6 text-black/55">
-        La app mostrara una previsualizacion antes de crear los cuadros.
-      </p>
-    </section>
+    <tr>
+      <td className="wc-sched-hora">{row.time}</td>
+      <td className="wc-sched-pista">{row.court ? `P${row.court}` : "—"}</td>
+      <td>
+        <span className="flex items-center gap-2">
+          <span
+            className="wc-dot"
+            style={{ backgroundColor: categoryCrestColor(row.categoryId) }}
+          />
+          <span className="wc-sched-teams">
+            {teamA}
+            <em>vs</em>
+            {teamB ?? "Pendiente"}
+          </span>
+        </span>
+      </td>
+      <td className="wc-sched-muted hidden md:table-cell">{row.categoryName}</td>
+      <td className="wc-sched-muted hidden sm:table-cell">{roundLabel(row)}</td>
+    </tr>
   );
 }
 
-function formatPublishedDate(value: string) {
-  try {
-    return new Intl.DateTimeFormat("es-ES", {
-      dateStyle: "short",
-      timeStyle: "short",
-    }).format(new Date(value));
-  } catch {
-    return "";
-  }
+function normalizeSearch(value: string) {
+  return value
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .toLowerCase();
+}
+
+function scheduleSearchText(row: ScheduleSummaryRow) {
+  return normalizeSearch(
+    [
+      row.match,
+      row.categoryName,
+      row.drawName,
+      row.roundName,
+      row.dayLabel,
+      row.time,
+      row.court ? `p${row.court}` : "",
+      row.court ? `pista ${row.court}` : "",
+      row.scheduleKey,
+    ].join(" "),
+  );
+}
+
+function PublicSchedulePanel({ rows }: { rows: ScheduleSummaryRow[] }) {
+  const [activeCategory, setActiveCategory] = useState("all");
+  const [query, setQuery] = useState("");
+
+  const categories = useMemo(() => {
+    const seen = new Set<string>();
+    const list: { id: string; name: string }[] = [];
+
+    rows.forEach((row) => {
+      if (!seen.has(row.categoryId)) {
+        seen.add(row.categoryId);
+        list.push({ id: row.categoryId, name: row.categoryName });
+      }
+    });
+
+    return list;
+  }, [rows]);
+
+  const normalizedQuery = normalizeSearch(query.trim());
+  const filtered = rows.filter((row) => {
+    const matchesCategory =
+      activeCategory === "all" || row.categoryId === activeCategory;
+    const matchesQuery =
+      !normalizedQuery || scheduleSearchText(row).includes(normalizedQuery);
+
+    return matchesCategory && matchesQuery;
+  });
+  const dayGroups = groupRowsByDay(filtered);
+
+  return (
+    <section className="flex flex-col gap-6">
+      <div className="flex flex-col gap-4">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <h2 className="wc-title text-2xl sm:text-3xl">Horarios del torneo</h2>
+          <span className="text-sm font-semibold text-[var(--ink-soft)]">
+            {filtered.length} de {rows.length} partidos
+          </span>
+        </div>
+
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex flex-wrap gap-2">
+            <button
+              className={`wc-pill ${activeCategory === "all" ? "wc-pill-active" : ""}`}
+              onClick={() => setActiveCategory("all")}
+              type="button"
+            >
+              Todas
+            </button>
+            {categories.map((category) => (
+              <button
+                className={`wc-pill ${
+                  activeCategory === category.id ? "wc-pill-active" : ""
+                }`}
+                key={category.id}
+                onClick={() => setActiveCategory(category.id)}
+                type="button"
+              >
+                <span
+                  className="wc-crest"
+                  style={{ backgroundColor: categoryCrestColor(category.id) }}
+                />
+                {category.name}
+              </button>
+            ))}
+          </div>
+
+          <div className="relative lg:w-96">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--ink-faint)]" />
+            <label className="sr-only" htmlFor="public-schedule-search">
+              Buscar horarios
+            </label>
+            <input
+              id="public-schedule-search"
+              className="wc-field w-full pl-9 pr-11"
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Jugador, pareja, categoria, pista, dia u hora"
+              type="search"
+              value={query}
+            />
+            {query ? (
+              <button
+                className="absolute right-2 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full text-[var(--ink-faint)] transition hover:bg-[var(--surface-2)] hover:text-[var(--ink)]"
+                onClick={() => setQuery("")}
+                title="Limpiar busqueda"
+                type="button"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            ) : null}
+          </div>
+        </div>
+      </div>
+
+      {filtered.length ? (
+        dayGroups.map((group) => (
+          <div className="flex flex-col gap-2.5" key={group.dayLabel}>
+            <div className="wc-day-head">
+              <h3 className="wc-day-title">{group.dayLabel}</h3>
+              <span className="text-xs font-semibold uppercase tracking-[0.1em] text-[var(--ink-faint)]">
+                {group.rows.length} partidos
+              </span>
+              <span className="wc-day-rule" />
+            </div>
+            <div className="overflow-x-auto">
+              <table className="wc-schedule">
+                <thead>
+                  <tr>
+                    <th>Hora</th>
+                    <th>Pista</th>
+                    <th>Enfrentamiento</th>
+                    <th className="hidden md:table-cell">Categoria</th>
+                    <th className="hidden sm:table-cell">Ronda</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {group.rows.map((row) => (
+                    <ScheduleRow key={row.scheduleKey} row={row} />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ))
+      ) : (
+        <div className="rounded-xl border border-dashed border-[var(--line-strong)] bg-[var(--surface-2)] p-6 text-sm font-semibold text-[var(--ink-faint)]">
+          {rows.length
+            ? "No hay partidos que coincidan con el filtro."
+            : "Horarios pendientes."}
+        </div>
+      )}
+    </section>
+  );
 }
 
 export function TournamentPublicPage({ slug }: { slug: string }) {
-  const storageKey = publishedTournamentStorageKey(slug);
-  const tournament = useSyncExternalStore(
-    (onStoreChange) => subscribeStorageKey(storageKey, onStoreChange),
-    () => readPublishedTournament(slug),
-    () => null,
+  const [tournament, setTournament] = useState<PublishedTournament | null>(
+    null,
   );
-  const [selectedCategoryId, setSelectedCategoryId] = useState("");
+  const [activePublicCategoryId, setActivePublicCategoryId] = useState("");
+  const [activePublicView, setActivePublicView] = useState<
+    "schedule" | "draws"
+  >("schedule");
+
+  useEffect(() => {
+    const read = () => setTournament(readPublishedTournament(slug));
+
+    read();
+    const interval = window.setInterval(read, 1500);
+
+    return () => window.clearInterval(interval);
+  }, [slug]);
 
   const drawSets = useMemo(
     () =>
-      buildDrawSets(
-        tournament?.categories ?? [],
-        tournament?.mainSelectionsByCategory ?? {},
-        tournament?.consolationSelectionsByCategory ?? {},
-      ),
+      tournament
+        ? buildDrawSets(
+            tournament.categories,
+            tournament.mainSelectionsByCategory,
+            tournament.consolationSelectionsByCategory,
+          )
+        : [],
     [tournament],
   );
-  const activeCategory =
-    tournament?.categories.find(
-      (category) =>
-        category.id === (selectedCategoryId || tournament.selectedCategoryId),
-    ) || tournament?.categories[0];
-  const activeDrawSet =
-    drawSets.find((drawSet) => drawSet.categoryId === activeCategory?.id) ||
-    drawSets[0];
-  const mainDraw = activeDrawSet?.mainDraw ?? emptyMainDraw;
-  const consolationDraw = activeDrawSet?.consolationDraw ?? emptyConsolationDraw;
   const schedule = useMemo(
-    () => buildGlobalSchedule(drawSets, tournament?.manualScheduleOverrides ?? {}),
-    [drawSets, tournament?.manualScheduleOverrides],
+    () =>
+      tournament
+        ? buildGlobalSchedule(
+            drawSets,
+            tournament.manualScheduleOverrides,
+            tournament.scheduleConfig ?? defaultScheduleConfig,
+          )
+        : { assignments: {}, conflicts: 0, saturdayCount: 0, total: 0 },
+    [drawSets, tournament],
   );
+  const publicSummaryRows = useMemo(
+    () =>
+      tournament
+        ? buildScheduleSummaryRows(
+            tournament.categories,
+            drawSets,
+            schedule.assignments,
+          )
+        : [],
+    [drawSets, schedule.assignments, tournament],
+  );
+  const activeDrawSet =
+    drawSets.find((drawSet) => drawSet.categoryId === activePublicCategoryId) ??
+    drawSets[0] ??
+    null;
+  const activePublicId = activeDrawSet?.categoryId ?? "";
 
   if (!tournament) {
     return (
-      <main className="min-h-screen bg-[#f5f4ef] text-[#111816]">
-        <div className="mx-auto flex w-full max-w-[1100px] flex-col gap-6 px-4 py-8 sm:px-6 lg:px-8">
-          <section className="rounded-xl border border-black/10 bg-white p-8 text-center shadow-sm">
-            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-xl bg-[#fff3d6] text-[#9b7732]">
-              <AlertTriangle className="h-7 w-7" />
-            </div>
-            <h1 className="mt-4 text-3xl font-black">Cuadro no publicado</h1>
-            <p className="mx-auto mt-2 max-w-xl text-sm font-semibold leading-6 text-black/55">
-              Todavia no hay datos para este enlace en este entorno de pruebas.
-              Cuando conectemos la base de datos, este enlace funcionara para
-              cualquier visitante.
-            </p>
-          </section>
-        </div>
+      <main className="wc-app grid min-h-screen place-items-center p-6">
+        <section className="wc-card wc-accent-top max-w-sm p-8 text-center">
+          <span className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-[var(--pitch-900)] text-[var(--gold-300)]">
+            <Trophy className="h-7 w-7" />
+          </span>
+          <h1 className="wc-title mt-4 text-2xl">Cuadro no publicado</h1>
+          <p className="mt-2 text-sm font-medium text-[var(--ink-soft)]">
+            Publicalo desde el panel de administracion.
+          </p>
+        </section>
       </main>
     );
   }
 
   return (
-    <main className="min-h-screen bg-[#f5f4ef] text-[#111816]">
-      <div className="mx-auto flex w-full max-w-[1500px] flex-col gap-6 px-4 py-5 sm:px-6 lg:px-8">
-        <header className="rounded-xl bg-[#07110d] p-5 text-white shadow-xl shadow-black/10 sm:p-7">
-          <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+    <main className="wc-app min-h-screen text-[var(--ink)]">
+      <header className="wc-hero-bar">
+        <div className="wc-bar">
+          <div className="flex items-center gap-3 sm:gap-4">
+            <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-white/10 text-[var(--gold-300)] ring-1 ring-white/15">
+              <Trophy className="h-6 w-6" />
+            </span>
             <div>
-              <p className="text-xs font-bold uppercase tracking-[0.24em] text-[#c59b45]">
-                Cuadro publico
+              <p className="font-display text-[0.68rem] font-semibold uppercase tracking-[0.3em] text-[var(--gold-300)]">
+                Match centre
               </p>
-              <h1 className="mt-2 text-3xl font-black tracking-normal sm:text-5xl">
-                {tournament.title}
+              <h1 className="font-display text-3xl font-bold uppercase leading-none sm:text-4xl">
+                {tournament.name}
               </h1>
             </div>
-            <div className="rounded-lg border border-white/15 px-4 py-3 text-sm font-bold text-white/75">
-              Actualizado {formatPublishedDate(tournament.updatedAt)}
-            </div>
           </div>
-        </header>
+          <div className="grid grid-cols-3 overflow-hidden rounded-2xl border border-white/15 bg-white/10 text-center">
+            {[
+              { label: "Categorias", value: drawSets.length },
+              { label: "Partidos", value: schedule.total },
+              { label: "Sabado", value: schedule.saturdayCount },
+            ].map((item, index) => (
+              <div
+                className={`px-4 py-2.5 sm:px-6 ${index === 1 ? "border-x border-white/15" : ""}`}
+                key={item.label}
+              >
+                <p className="font-display text-2xl font-bold tabular leading-none">
+                  {item.value}
+                </p>
+                <p className="mt-1 font-display text-[0.58rem] font-semibold uppercase tracking-[0.16em] text-white/55">
+                  {item.label}
+                </p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </header>
+      <div className="wc-container">
 
-        <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <StatCard
-            icon={Users}
-            label="Categorias"
-            value={tournament.categories.length}
-          />
-          <StatCard
-            icon={Trophy}
-            label="Parejas"
-            value={activeCategory?.pairs.length ?? 0}
-          />
-          <StatCard
-            icon={CalendarClock}
-            label="Sabado total"
-            value={`${schedule.saturdayCount}/${schedule.total}`}
-          />
-          <StatCard icon={Medal} label="Estado" value="En juego" />
-        </section>
-
-        <section className="rounded-xl border border-black/10 bg-white p-4 shadow-sm">
-          <div className="flex flex-wrap gap-2">
-            {tournament.categories.map((category) => (
+        <section className="wc-card-flat p-2">
+          <div className="grid gap-2 sm:grid-cols-2">
+            {[
+              { id: "schedule" as const, label: "Horarios" },
+              { id: "draws" as const, label: "Cuadros" },
+            ].map((tab) => (
               <button
-                className={`rounded-lg border px-3 py-2 text-sm font-bold transition ${
-                  category.id === activeCategory?.id
-                    ? "border-[#0f6b4b] bg-[#0f6b4b] text-white"
-                    : "border-black/10 bg-[#f7f7f3] text-[#111816] hover:border-[#0f6b4b]"
+                className={`wc-pill w-full justify-center ${
+                  activePublicView === tab.id ? "wc-pill-active" : ""
                 }`}
-                key={category.id}
-                onClick={() => setSelectedCategoryId(category.id)}
+                key={tab.id}
+                onClick={() => setActivePublicView(tab.id)}
                 type="button"
               >
-                {category.name}
-                <span className="ml-2 text-xs opacity-70">
-                  {category.pairs.length}
-                </span>
+                {tab.label}
               </button>
             ))}
           </div>
         </section>
 
-        <div className="grid gap-6">
-          <BracketBoard
-            categoryId={activeCategory?.id || ""}
-            draw={mainDraw}
-            readOnly
-            schedule={schedule.assignments}
-            subtitle="Resultados y horarios oficiales del cuadro principal."
-          />
-          <BracketBoard
-            categoryId={activeCategory?.id || ""}
-            draw={consolationDraw}
-            emptyText="La consolacion se llenara cuando avance el torneo."
-            readOnly
-            schedule={schedule.assignments}
-            subtitle="Cuadro de consolacion actualizado desde el panel admin."
-          />
-        </div>
+        {activePublicView === "schedule" ? (
+          <PublicSchedulePanel rows={publicSummaryRows} />
+        ) : null}
+
+        {activePublicView === "draws" ? (
+          <>
+            <section className="wc-card-flat p-2.5">
+              <div className="flex flex-wrap gap-2">
+                {drawSets.map((drawSet) => (
+                  <button
+                    className={`wc-pill ${
+                      drawSet.categoryId === activePublicId ? "wc-pill-active" : ""
+                    }`}
+                    key={drawSet.categoryId}
+                    onClick={() =>
+                      setActivePublicCategoryId(drawSet.categoryId)
+                    }
+                    type="button"
+                  >
+                    <span
+                      className="wc-crest"
+                      style={{
+                        backgroundColor: categoryCrestColor(drawSet.categoryId),
+                      }}
+                    />
+                    {drawSet.categoryName}
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            {activeDrawSet ? (
+              <section className="wc-wide grid gap-5">
+                <div className="flex items-center gap-2.5">
+                  <span
+                    className="wc-crest"
+                    style={{
+                      backgroundColor: categoryCrestColor(activeDrawSet.categoryId),
+                    }}
+                  />
+                  <h2 className="wc-title text-2xl">
+                    {activeDrawSet.categoryName}
+                  </h2>
+                </div>
+                <BracketView
+                  categoryId={activeDrawSet.categoryId}
+                  draw={activeDrawSet.mainDraw}
+                  readOnly
+                  schedule={schedule.assignments}
+                  title="Cuadro principal"
+                />
+                <BracketView
+                  categoryId={activeDrawSet.categoryId}
+                  draw={activeDrawSet.consolationDraw}
+                  readOnly
+                  schedule={schedule.assignments}
+                  title="Consolacion"
+                />
+              </section>
+            ) : null}
+          </>
+        ) : null}
       </div>
     </main>
   );
