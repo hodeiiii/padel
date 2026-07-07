@@ -2,7 +2,6 @@
 
 import {
   AlertTriangle,
-  CalendarClock,
   CheckCircle2,
   Copy,
   Crown,
@@ -25,6 +24,7 @@ import {
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   useSyncExternalStore,
   type ChangeEvent,
@@ -81,10 +81,10 @@ import {
 
 const adminPassword = "landerlander";
 const tabs = [
-  { id: "import", label: "Importar" },
+  { id: "import", label: "Datos" },
   { id: "rules", label: "Restricciones" },
-  { id: "draws", label: "Cuadros" },
-  { id: "public", label: "Publico" },
+  { id: "draws", label: "Cuadros y horarios" },
+  { id: "public", label: "Publicacion" },
 ] as const;
 
 type AdminTab = (typeof tabs)[number]["id"];
@@ -105,14 +105,6 @@ function readStoredAdminState(): AdminState {
   return (
     safeJsonParse<AdminState>(window.localStorage.getItem(adminStorageKey)) ??
     emptyAdminState
-  );
-}
-
-function readPublishedTournament(slug: string) {
-  if (typeof window === "undefined") return null;
-
-  return safeJsonParse<PublishedTournament>(
-    window.localStorage.getItem(publicStorageKey(slug)),
   );
 }
 
@@ -182,15 +174,15 @@ function AdminPasswordGate({ children }: { children: React.ReactNode }) {
     <main className="wc-app flex min-h-screen items-center justify-center p-6">
       <form className="wc-card wc-accent-top w-full max-w-sm p-6" onSubmit={submit}>
         <div className="mb-5 flex items-center gap-3">
-          <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-[var(--pitch-900)] text-[var(--gold-300)]">
+          <span className="rg-logo-mark">
             <Trophy className="h-6 w-6" />
           </span>
           <div>
-            <p className="wc-eyebrow">Padel Cup</p>
-            <h1 className="wc-title text-2xl">Panel de direccion</h1>
+            <p className="wc-eyebrow">Padel Bracket</p>
+            <h1 className="wc-title text-2xl">Panel privado</h1>
           </div>
         </div>
-        <label className="mb-1.5 block text-xs font-bold uppercase tracking-[0.14em] text-[var(--ink-soft)]">
+        <label className="wc-row-label mb-1.5 block">
           Acceso privado
         </label>
         <input
@@ -676,32 +668,29 @@ function TournamentAdminClient() {
 
   return (
     <main className="wc-app min-h-screen text-[var(--ink)]">
-      <header className="wc-hero-bar">
-        <div className="wc-bar">
-          <div className="flex items-center gap-3 sm:gap-4">
-            <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-white/10 text-[var(--gold-300)] ring-1 ring-white/15">
+      <header className="wc-topbar">
+        <div className="wc-topbar-inner">
+          <div className="flex min-w-0 items-center gap-3">
+            <span className="rg-logo-mark" aria-hidden="true">
               <Trophy className="h-6 w-6" />
             </span>
-            <div>
-              <p className="font-display text-[0.68rem] font-semibold uppercase tracking-[0.3em] text-[var(--gold-300)]">
-                Direccion de torneo
-              </p>
-              <h1 className="font-display text-3xl font-bold uppercase leading-none sm:text-4xl">
-                Padel Cup
-              </h1>
+            <div className="min-w-0">
+              <p className="wc-kicker">Tournament desk</p>
+              <h1 className="wc-brand-title truncate">Padel Bracket</h1>
             </div>
           </div>
-          <div className="flex flex-wrap gap-2">
+
+          <div className="wc-topbar-actions">
             <button
-              className="wc-btn wc-btn-gold"
+              className="wc-btn wc-btn-primary"
               disabled={loadingExcel}
               onClick={loadPublicExcel}
               type="button"
             >
               <FileSpreadsheet className="h-4 w-4" />
-              Excel de ejemplo
+              Excel demo
             </button>
-            <label className="wc-btn wc-btn-on-dark cursor-pointer">
+            <label className="wc-btn wc-btn-ghost cursor-pointer">
               <Upload className="h-4 w-4" />
               Subir Excel
               <input
@@ -714,8 +703,8 @@ function TournamentAdminClient() {
           </div>
         </div>
       </header>
-      <div className="wc-container">
 
+      <div className="wc-shell">
         {importError ? (
           <Notice
             icon={AlertTriangle}
@@ -735,113 +724,117 @@ function TournamentAdminClient() {
 
         {categories.length ? (
           <>
-            <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-              <StatCard
-                icon={Trophy}
-                label="Categorias"
-                value={categories.length}
-              />
-              <StatCard
-                icon={Users}
-                label="Parejas"
-                value={countPairs(categories)}
-              />
-              <StatCard
-                icon={AlertTriangle}
-                label="A revisar"
-                value={reviewCount}
-              />
-              <StatCard
-                icon={CalendarClock}
-                label="Sabado"
-                value={`${schedule.saturdayCount}/${schedule.total}`}
-              />
-              <StatCard
-                icon={LockKeyhole}
-                label="Candados"
-                value={totalLockCount}
-              />
-            </section>
-
-            <AdminTabs
-              activeTab={activeTab}
-              categoriesCount={categories.length}
+            <TournamentCommandCenter
+              activeCategoryName={activeCategory?.name ?? "Sin categoria"}
+              categories={categories}
               lockCount={totalLockCount}
-              onChange={setActiveTab}
+              manualPairLockCount={manualPairLockCount}
+              manualScheduleCount={manualScheduleCount}
+              onGoTo={setActiveTab}
+              published={Boolean(publishedSlug)}
               reviewCount={reviewCount}
+              scheduleConflicts={schedule.conflicts}
               scheduleTotal={schedule.total}
+              saturdayCount={schedule.saturdayCount}
             />
 
-            {activeTab !== "import" && activeTab !== "public" ? (
-              <CategoryTabs
-                activeCategoryId={activeCategory?.id ?? ""}
-                categories={categories}
-                onSelect={setActiveCategoryId}
-              />
-            ) : null}
+            <div className="wc-workspace">
+              <aside className="wc-rail-panel">
+                <AdminTabs
+                  activeTab={activeTab}
+                  categoriesCount={categories.length}
+                  lockCount={totalLockCount}
+                  onChange={setActiveTab}
+                  reviewCount={reviewCount}
+                  scheduleTotal={schedule.total}
+                />
+                <OperationalChecklist
+                  lockCount={totalLockCount}
+                  published={Boolean(publishedSlug)}
+                  reviewCount={reviewCount}
+                  scheduleConflicts={schedule.conflicts}
+                  scheduleTotal={schedule.total}
+                />
+              </aside>
 
-            {activeTab === "import" ? (
-              <ImportHelp
-                categories={categories}
-                loadingExcel={loadingExcel}
-                onLoadPublicExcel={loadPublicExcel}
-              />
-            ) : null}
+              <section className="wc-stage">
+                {activeTab === "rules" ? (
+                  <ScheduleConfigPanel
+                    onChange={setScheduleConfig}
+                    scheduleConfig={scheduleConfig}
+                  />
+                ) : null}
 
-            {activeTab === "rules" && activeCategory ? (
-              <RestrictionsPanel
-                category={activeCategory}
-                onAddRule={addRule}
-                onRemoveRule={removeRule}
-                onRefreshDraws={refreshCategoryDraws}
-                onUpdateScheduleConfig={setScheduleConfig}
-                onUpdatePair={updatePair}
-                onUpdateRule={updateRule}
-                scheduleConfig={scheduleConfig}
-              />
-            ) : null}
+                {activeTab !== "import" && activeTab !== "public" ? (
+                  <CategoryTabs
+                    activeCategoryId={activeCategory?.id ?? ""}
+                    categories={categories}
+                    onSelect={setActiveCategoryId}
+                  />
+                ) : null}
 
-            {activeTab === "draws" && activeCategory && activeDrawSet ? (
-              <DrawsPanel
-                category={activeCategory}
-                drawSet={activeDrawSet}
-                manualPairLocks={manualPairLocks[activeCategory.id] ?? {}}
-                manualScheduleOverrides={manualScheduleOverrides}
-                onClearSchedule={clearCategorySchedule}
-                onMovePair={movePairInBracket}
-                onRandomize={randomizeCategory}
-                onRecalculateKeepingManual={recalculateKeepingManual}
-                onResetManualSchedule={resetManualSchedule}
-                onSelectWinner={selectWinner}
-                onToggleMatchupLock={toggleMatchupLock}
-                onUpdateManualSchedule={updateManualSchedule}
-                scheduleConfig={scheduleConfig}
-                schedule={schedule.assignments}
-              />
-            ) : null}
+                {activeTab === "import" ? (
+                  <ImportHelp
+                    categories={categories}
+                    loadingExcel={loadingExcel}
+                    onLoadPublicExcel={loadPublicExcel}
+                  />
+                ) : null}
 
-            {activeTab === "public" ? (
-              <PublicAdminPanel
-                copied={copied}
-                onCopy={copyPublicLink}
-                onPublish={publishTournament}
-                publicPath={publicPath}
-                publicUrl={publicUrl}
-                published={Boolean(publishedSlug)}
-                rows={summaryRows}
-              />
-            ) : null}
+                {activeTab === "rules" && activeCategory ? (
+                  <RestrictionsPanel
+                    category={activeCategory}
+                    onAddRule={addRule}
+                    onRemoveRule={removeRule}
+                    onRefreshDraws={refreshCategoryDraws}
+                    onUpdatePair={updatePair}
+                    onUpdateRule={updateRule}
+                  />
+                ) : null}
 
-            {schedule.conflicts ? (
-              <Notice
-                icon={AlertTriangle}
-                tone="warning"
-                title="Horarios a revisar"
-                text={`${schedule.conflicts} partido(s) no respetan al 100% restricciones o pisan pista/hora.`}
-              />
-            ) : null}
+                {activeTab === "draws" && activeCategory && activeDrawSet ? (
+                  <DrawsPanel
+                    category={activeCategory}
+                    drawSet={activeDrawSet}
+                    manualPairLocks={manualPairLocks[activeCategory.id] ?? {}}
+                    manualScheduleOverrides={manualScheduleOverrides}
+                    onClearSchedule={clearCategorySchedule}
+                    onMovePair={movePairInBracket}
+                    onRandomize={randomizeCategory}
+                    onRecalculateKeepingManual={recalculateKeepingManual}
+                    onResetManualSchedule={resetManualSchedule}
+                    onSelectWinner={selectWinner}
+                    onToggleMatchupLock={toggleMatchupLock}
+                    onUpdateManualSchedule={updateManualSchedule}
+                    scheduleConfig={scheduleConfig}
+                    schedule={schedule.assignments}
+                  />
+                ) : null}
+
+                {activeTab === "public" ? (
+                  <PublicAdminPanel
+                    copied={copied}
+                    onCopy={copyPublicLink}
+                    onPublish={publishTournament}
+                    publicPath={publicPath}
+                    publicUrl={publicUrl}
+                    published={Boolean(publishedSlug)}
+                    rows={summaryRows}
+                  />
+                ) : null}
+
+                {schedule.conflicts ? (
+                  <Notice
+                    icon={AlertTriangle}
+                    tone="warning"
+                    title="Horarios a revisar"
+                    text={`${schedule.conflicts} partido(s) no respetan al 100% restricciones o pisan pista/hora.`}
+                  />
+                ) : null}
+              </section>
+            </div>
           </>
-        ) : (
+        ) : previewCategories.length ? null : (
           <EmptyState
             loading={loadingExcel}
             onLoadPublicExcel={loadPublicExcel}
@@ -867,7 +860,7 @@ function PreviewPanel({
         <div>
           <p className="wc-eyebrow text-[var(--gold-600)]">Vista previa del Excel</p>
           <h2 className="wc-title mt-1 text-2xl">
-            {categories.length} categorias · {countPairs(categories)} parejas
+            {categories.length} categorias / {countPairs(categories)} parejas
           </h2>
           <p className="mt-1 text-sm font-medium text-[var(--ink-soft)]">
             Revisa lo que se va a cargar. Las restricciones ya vienen
@@ -891,7 +884,7 @@ function PreviewPanel({
       <div className="mt-4 overflow-x-auto">
         <table className="w-full min-w-[720px] border-collapse text-sm">
           <thead>
-            <tr className="border-b border-[var(--line-strong)] text-left font-display text-xs uppercase tracking-[0.14em] text-[var(--ink-faint)]">
+            <tr className="border-b border-[var(--line-strong)] text-left font-display text-xs uppercase text-[var(--ink-faint)]">
               <th className="px-3 py-2.5 font-semibold">Categoria</th>
               <th className="px-3 py-2.5 font-semibold">Parejas</th>
               <th className="px-3 py-2.5 font-semibold">Reglas auto</th>
@@ -953,18 +946,17 @@ function EmptyState({
   onLoadPublicExcel: () => void;
 }) {
   return (
-    <section className="wc-card grid min-h-[440px] place-items-center p-8 text-center">
-      <div className="max-w-xl">
-        <span className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-[var(--pitch-900)] text-[var(--gold-300)]">
-          <FileSpreadsheet className="h-8 w-8" />
-        </span>
-        <h2 className="wc-title mt-5 text-3xl">Carga el cuadro del torneo</h2>
-        <p className="mx-auto mt-2 text-sm font-medium text-[var(--ink-soft)]">
-          La app leera categorias, parejas y restricciones, y propondra reglas
-          de disponibilidad editables antes de generar los cuadros.
+    <section className="wc-onboarding">
+      <div className="wc-onboarding-main">
+        <p className="wc-kicker">Nuevo torneo</p>
+        <h2 className="wc-onboarding-title">Del Excel al cuadro publico</h2>
+        <p className="wc-onboarding-copy">
+          Carga categorias y parejas, convierte las notas horarias en reglas
+          editables, calcula cruces con prioridad por dia y deja bloqueado lo
+          que el director del torneo ya haya decidido.
         </p>
         <button
-          className="wc-btn wc-btn-primary mx-auto mt-6 h-11"
+          className="wc-btn wc-btn-dark mt-5 h-11"
           disabled={loading}
           onClick={onLoadPublicExcel}
           type="button"
@@ -972,6 +964,39 @@ function EmptyState({
           <FileSpreadsheet className="h-4 w-4" />
           {loading ? "Cargando..." : "Cargar Excel de ejemplo"}
         </button>
+      </div>
+
+      <div className="wc-onboarding-flow">
+        {[
+          {
+            label: "1",
+            title: "Importar",
+            text: "Detecta categorias, parejas y notas del Excel.",
+          },
+          {
+            label: "2",
+            title: "Validar",
+            text: "Revisa SOLO PUEDE / NO PUEDE antes de sortear.",
+          },
+          {
+            label: "3",
+            title: "Fijar",
+            text: "Bloquea cruces u horarios y recalcula alrededor.",
+          },
+          {
+            label: "4",
+            title: "Publicar",
+            text: "Entrega horarios y cuadros en una vista para jugadores.",
+          },
+        ].map((item) => (
+          <article className="wc-onboarding-step" key={item.label}>
+            <span>{item.label}</span>
+            <div>
+              <h3>{item.title}</h3>
+              <p>{item.text}</p>
+            </div>
+          </article>
+        ))}
       </div>
     </section>
   );
@@ -1042,6 +1067,180 @@ function ImportHelp({
   );
 }
 
+function TournamentCommandCenter({
+  activeCategoryName,
+  categories,
+  lockCount,
+  manualPairLockCount,
+  manualScheduleCount,
+  onGoTo,
+  published,
+  reviewCount,
+  saturdayCount,
+  scheduleConflicts,
+  scheduleTotal,
+}: {
+  activeCategoryName: string;
+  categories: CategoryData[];
+  lockCount: number;
+  manualPairLockCount: number;
+  manualScheduleCount: number;
+  onGoTo: (tab: AdminTab) => void;
+  published: boolean;
+  reviewCount: number;
+  saturdayCount: number;
+  scheduleConflicts: number;
+  scheduleTotal: number;
+}) {
+  const pairCount = countPairs(categories);
+  const nextStep =
+    reviewCount > 0
+      ? {
+          action: "Abrir restricciones",
+          copy: `${reviewCount} pareja(s) necesitan una lectura humana antes de sortear.`,
+          tab: "rules" as const,
+          title: "Validar restricciones",
+        }
+      : scheduleConflicts > 0
+        ? {
+            action: "Resolver horarios",
+            copy: `${scheduleConflicts} partido(s) chocan con reglas, pista u hora.`,
+            tab: "draws" as const,
+            title: "Limpiar conflictos",
+          }
+        : scheduleTotal === 0
+          ? {
+              action: "Ir a cuadros",
+              copy: "El Excel esta cargado. Falta generar, fijar y revisar cruces.",
+              tab: "draws" as const,
+              title: "Construir el cuadro",
+            }
+          : !published
+            ? {
+                action: "Preparar publicacion",
+                copy: "El calendario ya tiene partidos. Revisa candados y publica.",
+                tab: "public" as const,
+                title: "Listo para publicar",
+              }
+            : {
+                action: "Actualizar publico",
+                copy: "La salida publica existe. Cualquier cambio manual puede republicarse.",
+                tab: "public" as const,
+                title: "Torneo en vivo",
+              };
+
+  return (
+    <section className="wc-command-center">
+      <div className="wc-command-main">
+        <div>
+          <p className="wc-kicker">Estado operativo</p>
+          <h2 className="wc-command-title">{nextStep.title}</h2>
+          <p className="wc-command-copy">{nextStep.copy}</p>
+        </div>
+        <button
+          className="wc-btn wc-btn-dark"
+          onClick={() => onGoTo(nextStep.tab)}
+          type="button"
+        >
+          {nextStep.action}
+        </button>
+      </div>
+
+      <div className="wc-command-grid">
+        <CommandMetric
+          label="Categorias"
+          meta={activeCategoryName}
+          value={categories.length}
+        />
+        <CommandMetric label="Parejas" meta="Excel validado" value={pairCount} />
+        <CommandMetric
+          label="Partidos"
+          meta={`${saturdayCount} en sabado`}
+          value={scheduleTotal}
+        />
+        <CommandMetric
+          label="Candados"
+          meta={`${manualPairLockCount} cruces / ${manualScheduleCount} horarios`}
+          value={lockCount}
+        />
+      </div>
+    </section>
+  );
+}
+
+function CommandMetric({
+  label,
+  meta,
+  value,
+}: {
+  label: string;
+  meta: string;
+  value: number | string;
+}) {
+  return (
+    <article className="wc-command-metric">
+      <p className="wc-command-metric-label">{label}</p>
+      <p className="wc-command-metric-value">{value}</p>
+      <p className="wc-command-metric-meta">{meta}</p>
+    </article>
+  );
+}
+
+function OperationalChecklist({
+  lockCount,
+  published,
+  reviewCount,
+  scheduleConflicts,
+  scheduleTotal,
+}: {
+  lockCount: number;
+  published: boolean;
+  reviewCount: number;
+  scheduleConflicts: number;
+  scheduleTotal: number;
+}) {
+  const checks = [
+    {
+      done: reviewCount === 0,
+      label: reviewCount ? `${reviewCount} restricciones pendientes` : "Restricciones claras",
+    },
+    {
+      done: scheduleTotal > 0,
+      label: scheduleTotal ? `${scheduleTotal} partidos calculados` : "Cuadros por generar",
+    },
+    {
+      done: scheduleConflicts === 0 && scheduleTotal > 0,
+      label: scheduleConflicts ? `${scheduleConflicts} conflictos` : "Horarios coherentes",
+    },
+    {
+      done: lockCount > 0,
+      label: lockCount ? `${lockCount} decisiones fijadas` : "Sin candados manuales",
+    },
+    {
+      done: published,
+      label: published ? "Publicado" : "Pendiente de publicar",
+    },
+  ];
+
+  return (
+    <section className="wc-readiness">
+      <p className="wc-kicker">Checklist</p>
+      <div className="mt-3 grid gap-2">
+        {checks.map((check) => (
+          <div className="wc-readiness-row" key={check.label}>
+            <span
+              className={`wc-readiness-dot ${
+                check.done ? "wc-readiness-dot-ok" : ""
+              }`}
+            />
+            <span>{check.label}</span>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function AdminTabs({
   activeTab,
   categoriesCount,
@@ -1084,7 +1283,7 @@ function AdminTabs({
   };
 
   return (
-    <nav className="wc-stepper" aria-label="Fases del torneo">
+    <nav className="wc-process" aria-label="Fases del torneo">
       {tabs.map((tab) => {
         const active = activeTab === tab.id;
         const done = tabDetails[tab.id].done;
@@ -1092,18 +1291,18 @@ function AdminTabs({
         return (
           <button
             aria-current={active ? "step" : undefined}
-            className={`wc-step ${active ? "wc-step-active" : ""}`}
+            className={`wc-process-step ${active ? "wc-process-step-active" : ""}`}
             key={tab.id}
             onClick={() => onChange(tab.id)}
             type="button"
           >
             <span
-              className={`wc-step-badge ${
+              className={`wc-process-badge ${
                 active
-                  ? "wc-step-badge-active"
+                  ? "wc-process-badge-active"
                   : done
-                    ? "wc-step-badge-done"
-                    : "wc-step-badge-idle"
+                    ? "wc-process-badge-done"
+                    : "wc-process-badge-idle"
               }`}
             >
               {done && !active ? (
@@ -1114,13 +1313,15 @@ function AdminTabs({
             </span>
             <span className="min-w-0">
               <span
-                className={`wc-step-name ${active ? "text-white" : "text-[var(--ink)]"}`}
+                className={`wc-process-name ${
+                  active ? "text-[var(--pitch-900)]" : "text-[var(--ink)]"
+                }`}
               >
                 {tab.label}
               </span>
               <span
-                className={`wc-step-status block truncate ${
-                  active ? "text-[var(--gold-300)]" : "text-[var(--ink-soft)]"
+                className={`wc-process-status block truncate ${
+                  active ? "text-[var(--clay-dark)]" : "text-[var(--ink-soft)]"
                 }`}
               >
                 {tabDetails[tab.id].status}
@@ -1194,16 +1395,13 @@ function RestrictionsPanel({
   onAddRule,
   onRefreshDraws,
   onRemoveRule,
-  onUpdateScheduleConfig,
   onUpdatePair,
   onUpdateRule,
-  scheduleConfig,
 }: {
   category: CategoryData;
   onAddRule: (categoryId: string, pairId: string) => void;
   onRefreshDraws: (categoryId: string) => void;
   onRemoveRule: (categoryId: string, pairId: string, ruleId: string) => void;
-  onUpdateScheduleConfig: (config: TournamentScheduleConfig) => void;
   onUpdatePair: (
     categoryId: string,
     pairId: string,
@@ -1215,20 +1413,33 @@ function RestrictionsPanel({
     ruleId: string,
     patch: Partial<RestrictionRule>,
   ) => void;
-  scheduleConfig: TournamentScheduleConfig;
 }) {
+  const reviewPairs = category.pairs.filter((pair) => pair.review).length;
+  const structuredRules = category.pairs.reduce(
+    (total, pair) => total + pair.rules.length,
+    0,
+  );
+
   return (
-    <section className="wc-card wc-accent-top p-4 sm:p-5">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+    <section className="wc-pane">
+      <div className="wc-pane-head">
         <div>
-          <p className="wc-eyebrow">Disponibilidad de parejas</p>
-          <h2 className="wc-title mt-1 text-2xl">{category.name}</h2>
-          <p className="mt-1 max-w-3xl text-sm font-medium text-[var(--ink-soft)]">
-            Convierte texto libre en{" "}
-            <span className="font-bold text-[var(--pitch-700)]">SOLO PUEDE</span>{" "}
-            o <span className="font-bold text-[var(--coral-600)]">NO PUEDE</span>{" "}
-            con rango horario. Fuera de un NO PUEDE se considera disponible.
+          <p className="wc-kicker">Restricciones</p>
+          <h2 className="wc-pane-title">{category.name}</h2>
+          <p className="wc-pane-copy">
+            Traduce las notas del Excel a reglas horarias reales. Estas reglas
+            se combinan con el motor horario global del torneo.
           </p>
+        </div>
+        <div className="wc-pane-actions">
+          <span className="wc-chip wc-chip-neutral">
+            {structuredRules} reglas
+          </span>
+          <span
+            className={`wc-chip ${reviewPairs ? "wc-chip-amber" : "wc-chip-green"}`}
+          >
+            {reviewPairs ? `${reviewPairs} a revisar` : "Sin avisos"}
+          </span>
         </div>
         <button
           className="wc-btn wc-btn-primary"
@@ -1240,33 +1451,20 @@ function RestrictionsPanel({
         </button>
       </div>
 
-      <ScheduleConfigPanel
-        onChange={onUpdateScheduleConfig}
-        scheduleConfig={scheduleConfig}
-      />
-
-      <div className="mt-4 grid gap-3">
-        {category.pairs.map((pair) => (
-          <article
-            className={`rounded-2xl border p-3.5 ${
-              pair.review
-                ? "border-[var(--amber-500)] bg-[var(--amber-50)]"
-                : "border-[var(--line)] bg-[var(--surface-2)]"
-            }`}
-            key={pair.id}
-          >
-            <div className="grid gap-3 xl:grid-cols-[260px_minmax(260px,1fr)_minmax(420px,1.2fr)]">
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="wc-seed">{pair.seed}</span>
-                  <p className="font-display text-xs font-semibold uppercase tracking-[0.16em] text-[var(--ink-faint)]">
-                    Pareja
-                  </p>
+      <div className="wc-rules-layout">
+        <div className="wc-rules-list">
+          {category.pairs.map((pair) => (
+            <article
+              className={`wc-pair-row ${pair.review ? "wc-pair-row-review" : ""}`}
+              key={pair.id}
+            >
+              <div className="wc-pair-identity">
+                <span className="wc-seed">{pair.seed}</span>
+                <div className="min-w-0">
+                  <p className="wc-row-label">Pareja</p>
+                  <h3>{pair.playerOne} / {pair.playerTwo}</h3>
                 </div>
-                <h3 className="mt-1.5 text-base font-bold leading-tight">
-                  {pair.playerOne} / {pair.playerTwo}
-                </h3>
-                <label className="mt-3 inline-flex cursor-pointer items-center gap-2 text-sm font-bold">
+                <label className="wc-review-toggle">
                   <input
                     checked={pair.review}
                     className="h-4 w-4 accent-[var(--amber-500)]"
@@ -1277,22 +1475,14 @@ function RestrictionsPanel({
                     }
                     type="checkbox"
                   />
-                  Marcar para revisar
+                  Revisar
                 </label>
               </div>
 
-              <div className="wc-card-flat p-3">
-                <p className="font-display text-xs font-semibold uppercase tracking-[0.16em] text-[var(--ink-faint)]">
-                  Texto del Excel
-                </p>
-                <p className="mt-1.5 text-sm font-semibold text-[var(--ink)]">
-                  {pair.rawRestriction || "Sin restriccion compacta"}
-                </p>
-                {pair.rawNotes ? (
-                  <p className="mt-1.5 text-sm text-[var(--ink-soft)]">
-                    {pair.rawNotes}
-                  </p>
-                ) : null}
+              <div className="wc-excel-note">
+                <p className="wc-row-label">Excel</p>
+                <p>{pair.rawRestriction || "Sin restriccion compacta"}</p>
+                {pair.rawNotes ? <small>{pair.rawNotes}</small> : null}
                 {pair.reviewReasons.length ? (
                   <div className="mt-2 flex flex-wrap gap-1.5">
                     {pair.reviewReasons.map((reason) => (
@@ -1304,11 +1494,9 @@ function RestrictionsPanel({
                 ) : null}
               </div>
 
-              <div className="grid content-start gap-2">
-                <div className="flex items-center justify-between gap-2">
-                  <p className="font-display text-xs font-semibold uppercase tracking-[0.16em] text-[var(--ink-faint)]">
-                    Reglas estructuradas
-                  </p>
+              <div className="wc-rule-stack">
+                <div className="wc-rule-stack-head">
+                  <p className="wc-row-label">Reglas para calcular</p>
                   <button
                     className="wc-btn wc-btn-ghost wc-btn-sm"
                     onClick={() => onAddRule(category.id, pair.id)}
@@ -1333,14 +1521,14 @@ function RestrictionsPanel({
                     />
                   ))
                 ) : (
-                  <div className="rounded-xl border border-dashed border-[var(--line-strong)] bg-[var(--surface)] p-3 text-sm font-semibold text-[var(--ink-faint)]">
-                    Sin reglas: puede jugar en cualquier hueco disponible.
+                  <div className="wc-empty-inline">
+                    Sin reglas: disponible en cualquier hueco del torneo.
                   </div>
                 )}
               </div>
-            </div>
-          </article>
-        ))}
+            </article>
+          ))}
+        </div>
       </div>
     </section>
   );
@@ -1397,14 +1585,14 @@ function ScheduleConfigPanel({
   }
 
   return (
-    <section className="mt-4 rounded-2xl border border-[var(--line)] bg-[var(--surface-2)] p-3.5">
+    <section className="wc-schedule-config">
       <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
         <div className="min-w-0">
-          <p className="wc-eyebrow">Horarios para calcular</p>
-          <h3 className="wc-title mt-0.5 text-lg">Disponibilidad del torneo</h3>
+          <p className="wc-kicker">Motor horario global</p>
+          <h3 className="wc-section-title">Dias y ventanas del torneo</h3>
           <p className="mt-1 text-sm font-medium text-[var(--ink-soft)]">
-            Estos tramos se usan al validar, sortear y recalcular con las 8 pistas
-            compartidas.
+            Estos tramos se aplican a todas las categorias al validar, sortear
+            y recalcular con las 8 pistas compartidas.
           </p>
         </div>
         <button
@@ -1417,15 +1605,15 @@ function ScheduleConfigPanel({
         </button>
       </div>
 
-      <div className="mt-3 grid gap-3 xl:grid-cols-[minmax(0,1.5fr)_minmax(280px,0.8fr)]">
+      <div className="mt-3 grid gap-3">
         <div className="grid gap-2 lg:grid-cols-3">
           {dayOptions.map((day) => (
             <article
-              className="rounded-xl border border-[var(--line)] bg-[var(--surface)] p-3"
+              className="wc-day-window-card"
               key={day.key}
             >
               <div className="mb-2 flex items-center justify-between gap-2">
-                <h4 className="font-display text-xs font-semibold uppercase tracking-[0.14em] text-[var(--ink-faint)]">
+                <h4 className="wc-row-label">
                   {day.label}
                 </h4>
                 <span className="wc-chip wc-chip-neutral">
@@ -1439,7 +1627,7 @@ function ScheduleConfigPanel({
                     className="grid grid-cols-[auto_1fr_1fr] items-center gap-2"
                     key={`${day.key}-${index}`}
                   >
-                    <span className="font-display text-[0.62rem] font-bold uppercase tracking-[0.12em] text-[var(--ink-faint)]">
+                    <span className="font-display text-[0.7rem] font-bold uppercase text-[var(--ink-faint)]">
                       T{index + 1}
                     </span>
                     <input
@@ -1469,8 +1657,8 @@ function ScheduleConfigPanel({
           ))}
         </div>
 
-        <article className="rounded-xl border border-[var(--line)] bg-[var(--surface)] p-3">
-          <p className="font-display text-xs font-semibold uppercase tracking-[0.14em] text-[var(--ink-faint)]">
+        <article className="wc-day-window-card">
+          <p className="wc-row-label">
             Prioridad automatica
           </p>
           <div className="mt-2 grid gap-2">
@@ -1514,10 +1702,8 @@ function RuleEditor({
 
   return (
     <div
-      className={`grid grid-cols-2 gap-2 rounded-xl border-l-4 border border-[var(--line)] bg-[var(--surface)] p-2 sm:grid-cols-[140px_104px_1fr_1fr_auto] ${
-        available
-          ? "border-l-[var(--pitch-600)]"
-          : "border-l-[var(--coral-500)]"
+      className={`wc-rule-editor ${
+        available ? "wc-rule-editor-available" : "wc-rule-editor-blocked"
       }`}
     >
       <select
@@ -1601,19 +1787,36 @@ function DrawsPanel({
   scheduleConfig: TournamentScheduleConfig;
   schedule: Record<string, ScheduleAssignment>;
 }) {
+  const lockedCruces = Object.keys(manualPairLocks).length;
+  const lockedHorarios = Object.keys(manualScheduleOverrides).filter((key) =>
+    key.startsWith(`${category.id}:`),
+  ).length;
+
   return (
     <div className="grid gap-5">
-      <section className="wc-card wc-accent-top p-4 sm:p-5">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+      <section className="wc-pane">
+        <div className="wc-pane-head">
           <div className="flex items-center gap-2.5">
             <span
               className="wc-crest"
               style={{ backgroundColor: categoryCrestColor(category.id) }}
             />
             <div>
-              <p className="wc-eyebrow">Cuadro activo</p>
-              <h2 className="wc-title mt-0.5 text-2xl">{category.name}</h2>
+              <p className="wc-kicker">Mesa de cuadros</p>
+              <h2 className="wc-pane-title">{category.name}</h2>
+              <p className="wc-pane-copy">
+                Sortea, fija cruces concretos y bloquea horarios manuales antes
+                de recalcular el resto.
+              </p>
             </div>
+          </div>
+          <div className="wc-pane-actions">
+            <span className="wc-chip wc-chip-neutral">
+              {lockedCruces} cruces fijos
+            </span>
+            <span className="wc-chip wc-chip-neutral">
+              {lockedHorarios} horarios fijos
+            </span>
           </div>
           <button
             className="wc-btn wc-btn-primary"
@@ -1645,7 +1848,7 @@ function DrawsPanel({
         onToggleLock={onToggleMatchupLock}
       />
 
-      <section className="wc-wide grid gap-5">
+      <section className="wc-bracket-field grid gap-5">
         <BracketView
           categoryId={category.id}
           draw={drawSet.mainDraw}
@@ -1677,17 +1880,32 @@ function MatchupEditor({
   onToggleLock: (categoryId: string, slotIndexes: number[]) => void;
 }) {
   const lockedPairIds = new Set(Object.values(manualPairLocks));
+  const [draggingPairId, setDraggingPairId] = useState<string | null>(null);
+  const [dragOverSlot, setDragOverSlot] = useState<number | null>(null);
   const matchupSlots = Array.from(
     { length: Math.ceil(category.pairs.length / 2) },
     (_, index) => [index * 2, index * 2 + 1],
   );
 
+  function canDropOnSlot(slot: number, pairId: string | null) {
+    if (!pairId) return false;
+    if (manualPairLocks[String(slot)]) return false;
+
+    const currentPair = category.pairs[slot];
+
+    return !lockedPairIds.has(pairId) || currentPair?.id === pairId;
+  }
+
   return (
-    <section className="wc-card-flat p-4">
-      <div className="flex flex-col gap-1.5 lg:flex-row lg:items-center lg:justify-between">
+    <section className="wc-pane">
+      <div className="wc-pane-head">
         <div>
-          <p className="wc-eyebrow">Emparejamientos de 1a ronda</p>
-          <h3 className="wc-title mt-0.5 text-lg">Bloquea los cruces</h3>
+          <p className="wc-kicker">Cruces manuales</p>
+          <h3 className="wc-section-title">Primera ronda</h3>
+          <p className="wc-pane-copy">
+            Mueve parejas entre slots y bloquea los cruces que no deben cambiar
+            en futuros sorteos.
+          </p>
         </div>
         <span
           className={`wc-chip ${
@@ -1702,7 +1920,7 @@ function MatchupEditor({
             : "Sin cruces bloqueados"}
         </span>
       </div>
-      <div className="mt-3 grid gap-3 lg:grid-cols-2 xl:grid-cols-3">
+      <div className="wc-matchup-grid">
         {matchupSlots.map((slots, matchupIndex) => {
           const lockableSlots = slots.filter((slot) => category.pairs[slot]);
           const locked = lockableSlots.length > 0 && lockableSlots.every((slot) =>
@@ -1711,15 +1929,15 @@ function MatchupEditor({
 
           return (
             <article
-              className={`rounded-xl border p-3 ${
+              className={`wc-matchup-card ${
                 locked
-                  ? "border-[var(--pitch-600)] bg-[var(--pitch-50)]"
-                  : "border-[var(--line)] bg-[var(--surface)]"
+                  ? "wc-matchup-card-locked"
+                  : ""
               }`}
               key={slots.join("-")}
             >
               <div className="mb-3 flex items-center justify-between gap-2">
-                <p className="font-display text-xs font-semibold uppercase tracking-[0.14em] text-[var(--ink-faint)]">
+                <p className="wc-row-label">
                   Partido {matchupIndex + 1}
                 </p>
                 <button
@@ -1749,41 +1967,117 @@ function MatchupEditor({
                 {slots.map((slot) => {
                   const pair = category.pairs[slot];
                   const slotLocked = Boolean(manualPairLocks[String(slot)]);
+                  const canDrop = canDropOnSlot(slot, draggingPairId);
 
                   return (
-                    <label className="grid min-w-0 gap-1" key={slot}>
-                      <span className="font-display text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--ink-faint)]">
+                    <div
+                      className={`wc-matchup-slot ${
+                        dragOverSlot === slot && canDrop
+                          ? "wc-matchup-slot-over"
+                          : ""
+                      }`}
+                      key={slot}
+                      onDragLeave={() => {
+                        if (dragOverSlot === slot) setDragOverSlot(null);
+                      }}
+                      onDragOver={(event) => {
+                        if (!canDrop) return;
+
+                        event.preventDefault();
+                        event.dataTransfer.dropEffect = "move";
+                        setDragOverSlot(slot);
+                      }}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        const pairId = event.dataTransfer.getData(
+                          "application/x-padel-pair",
+                        );
+
+                        setDragOverSlot(null);
+                        setDraggingPairId(null);
+
+                        if (!canDropOnSlot(slot, pairId)) return;
+
+                        onMovePair(category.id, slot, pairId);
+                      }}
+                    >
+                      <span className="wc-row-label">
                         Slot {slot + 1}
                       </span>
                       {pair ? (
-                        <select
-                          className="wc-field h-10 w-full min-w-0 truncate"
-                          disabled={slotLocked}
-                          onChange={(event) =>
-                            onMovePair(category.id, slot, event.target.value)
-                          }
-                          value={pair.id}
-                        >
-                          {category.pairs.map((option) => (
-                            <option
-                              disabled={
-                                lockedPairIds.has(option.id) &&
-                                option.id !== pair.id
+                        <>
+                          <div
+                            className={`wc-draggable-pair ${
+                              slotLocked ? "wc-draggable-pair-locked" : ""
+                            }`}
+                            draggable={!slotLocked && !lockedPairIds.has(pair.id)}
+                            onDragEnd={() => {
+                              setDraggingPairId(null);
+                              setDragOverSlot(null);
+                            }}
+                            onDragStart={(event) => {
+                              if (slotLocked || lockedPairIds.has(pair.id)) {
+                                event.preventDefault();
+                                return;
                               }
-                              key={option.id}
-                              value={option.id}
-                            >
-                              {option.seed}. {option.playerOne} /{" "}
-                              {option.playerTwo}
-                            </option>
-                          ))}
-                        </select>
+
+                              event.dataTransfer.effectAllowed = "move";
+                              event.dataTransfer.setData(
+                                "application/x-padel-pair",
+                                pair.id,
+                              );
+                              event.dataTransfer.setData("text/plain", pair.id);
+                              setDraggingPairId(pair.id);
+                            }}
+                            title={
+                              slotLocked
+                                ? "Slot bloqueado"
+                                : "Arrastra para mover esta pareja"
+                            }
+                          >
+                            <span className="wc-drag-handle" aria-hidden="true">
+                              ::
+                            </span>
+                            <span className="min-w-0 truncate">
+                              {pair.seed}. {pair.playerOne} / {pair.playerTwo}
+                            </span>
+                          </div>
+                          <select
+                            aria-label={`Cambiar slot ${slot + 1}`}
+                            className="wc-field h-9 w-full min-w-0 truncate"
+                            disabled={slotLocked}
+                            onChange={(event) =>
+                              onMovePair(category.id, slot, event.target.value)
+                            }
+                            value={pair.id}
+                          >
+                            {category.pairs.map((option) => (
+                              <option
+                                disabled={
+                                  lockedPairIds.has(option.id) &&
+                                  option.id !== pair.id
+                                }
+                                key={option.id}
+                                value={option.id}
+                              >
+                                {option.seed}. {option.playerOne} /{" "}
+                                {option.playerTwo}
+                              </option>
+                            ))}
+                          </select>
+                        </>
                       ) : (
-                        <div className="flex h-10 items-center rounded-lg border border-dashed border-[var(--line-strong)] bg-[var(--surface-2)] px-2 text-sm font-bold text-[var(--ink-faint)]">
+                        <div
+                          className={`wc-bye-slot ${
+                            dragOverSlot === slot && canDrop
+                              ? "wc-matchup-slot-over"
+                              : ""
+                          }`}
+                        >
                           Bye
                         </div>
                       )}
-                    </label>
+                    </div>
                   );
                 })}
               </div>
@@ -1792,6 +2086,85 @@ function MatchupEditor({
         })}
       </div>
     </section>
+  );
+}
+
+function DragScrollArea({ children }: { children: React.ReactNode }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef({
+    active: false,
+    moved: false,
+    scrollLeft: 0,
+    startX: 0,
+  });
+
+  function endDrag(event: React.PointerEvent<HTMLDivElement>) {
+    const container = containerRef.current;
+
+    if (!container || !dragRef.current.active) return;
+
+    dragRef.current.active = false;
+    container.classList.remove("is-dragging");
+
+    if (container.hasPointerCapture(event.pointerId)) {
+      container.releasePointerCapture(event.pointerId);
+    }
+  }
+
+  return (
+    <div
+      className="padel-bracket-scroll overflow-x-auto pb-4"
+      onClickCapture={(event) => {
+        if (!dragRef.current.moved) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+        dragRef.current.moved = false;
+      }}
+      onPointerCancel={endDrag}
+      onPointerDown={(event) => {
+        if (event.button !== 0) return;
+        // On touch/pen let the browser scroll natively (with momentum); the
+        // manual drag is a mouse-only affordance.
+        if (event.pointerType !== "mouse") return;
+
+        const target = event.target as HTMLElement;
+        const interactive = target.closest(
+          "a,button,input,select,textarea,[role='button']",
+        );
+
+        if (interactive) return;
+
+        const container = containerRef.current;
+
+        if (!container) return;
+
+        dragRef.current = {
+          active: true,
+          moved: false,
+          scrollLeft: container.scrollLeft,
+          startX: event.clientX,
+        };
+        container.classList.add("is-dragging");
+        container.setPointerCapture(event.pointerId);
+      }}
+      onPointerLeave={endDrag}
+      onPointerMove={(event) => {
+        const container = containerRef.current;
+
+        if (!container || !dragRef.current.active) return;
+
+        const deltaX = event.clientX - dragRef.current.startX;
+
+        if (Math.abs(deltaX) > 4) dragRef.current.moved = true;
+
+        container.scrollLeft = dragRef.current.scrollLeft - deltaX;
+      }}
+      onPointerUp={endDrag}
+      ref={containerRef}
+    >
+      {children}
+    </div>
   );
 }
 
@@ -1811,77 +2184,97 @@ function BracketView({
   title: string;
 }) {
   const isConsolation = draw.kind === "consolation";
+  const maxRoundMatches = Math.max(
+    0,
+    ...draw.rounds.map((round) => round.matches.length),
+  );
+  const densityClass =
+    maxRoundMatches >= 16
+      ? "draw-board-large"
+      : maxRoundMatches >= 8
+        ? "draw-board-medium"
+        : "";
 
   return (
-    <section className="wc-card overflow-hidden p-4 sm:p-5">
-      <div className="mb-4 flex items-end justify-between gap-3">
-        <div className="flex items-center gap-2.5">
-          <span
-            className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${
-              isConsolation
-                ? "bg-[var(--court-600)] text-white"
-                : "bg-[var(--pitch-900)] text-[var(--gold-300)]"
-            }`}
-          >
-            {isConsolation ? (
-              <Users className="h-5 w-5" />
-            ) : (
-              <Trophy className="h-5 w-5" />
-            )}
-          </span>
-          <div>
-            <h2 className="wc-title text-xl">{title}</h2>
-            <p className="mt-0.5 text-sm font-medium text-[var(--ink-soft)]">
-              {draw.rounds.length
-                ? "Selecciona ganadores para avanzar"
-                : "Pendiente"}
-            </p>
+    <section className={`draw-board ${densityClass}`}>
+      {!readOnly ? (
+        <div className="draw-board-head">
+          <div className="flex items-center gap-2.5">
+            <span
+              className={`draw-board-icon ${
+                isConsolation
+                  ? "draw-board-icon-blue"
+                  : "draw-board-icon-green"
+              }`}
+            >
+              {isConsolation ? (
+                <Users className="h-5 w-5" />
+              ) : (
+                <Trophy className="h-5 w-5" />
+              )}
+            </span>
+            <div>
+              <p className="wc-kicker">
+                {isConsolation ? "Consolacion" : "Principal"}
+              </p>
+              <h2 className="wc-section-title">{title}</h2>
+              <p className="draw-board-copy mt-0.5 text-sm font-medium text-[var(--ink-soft)]">
+                {draw.rounds.length
+                  ? "Selecciona ganadores para avanzar"
+                  : "Pendiente"}
+              </p>
+            </div>
           </div>
         </div>
-      </div>
+      ) : null}
 
       {draw.rounds.length ? (
-        <div className="padel-bracket-scroll overflow-x-auto pb-2">
-          <div className="padel-bracket">
-            {draw.rounds.map((round, roundIndex) => {
-              const isFinal = roundIndex === draw.rounds.length - 1;
+        <DragScrollArea>
+          <div className="padel-bracket-frame">
+            {readOnly ? (
+              <h2 className="draw-board-inline-title">{title}</h2>
+            ) : null}
+            <div className="padel-bracket">
+              {draw.rounds.map((round, roundIndex) => {
+                const isFinal = roundIndex === draw.rounds.length - 1;
 
-              return (
-                <div className="flex min-w-[216px] flex-col" key={round.id}>
-                  <div
-                    className={`wc-round-label mb-3 ${
-                      isFinal
-                        ? "wc-round-label-final"
-                        : isConsolation
-                          ? "wc-round-label-blue"
-                          : ""
-                    }`}
-                  >
-                    {round.name}
+                return (
+                  <div className="padel-round-column" key={round.id}>
+                    <div
+                      className={`wc-round-label mb-3 ${
+                        isFinal
+                          ? "wc-round-label-final"
+                          : isConsolation
+                            ? "wc-round-label-blue"
+                            : ""
+                      }`}
+                    >
+                      {round.name}
+                    </div>
+                    <div
+                      className={`padel-round ${isFinal ? "padel-round--final" : ""}`}
+                    >
+                      {round.matches.map((match) => (
+                        <div className="padel-match-cell" key={match.id}>
+                          <MatchCard
+                            categoryId={categoryId}
+                            isFinal={isFinal}
+                            match={match}
+                            onSelectWinner={onSelectWinner}
+                            readOnly={readOnly}
+                            schedule={schedule[matchScheduleKey(categoryId, match)]}
+                          />
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                  <div
-                    className={`padel-round ${isFinal ? "padel-round--final" : ""}`}
-                  >
-                    {round.matches.map((match) => (
-                      <div className="padel-match-cell" key={match.id}>
-                        <MatchCard
-                          categoryId={categoryId}
-                          isFinal={isFinal}
-                          match={match}
-                          onSelectWinner={onSelectWinner}
-                          readOnly={readOnly}
-                          schedule={schedule[matchScheduleKey(categoryId, match)]}
-                        />
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              );
-            })}
+                );
+              })}
+            </div>
           </div>
-        </div>
+        </DragScrollArea>
       ) : (
-        <div className="rounded-xl border border-dashed border-[var(--line-strong)] bg-[var(--surface-2)] p-6 text-sm font-semibold text-[var(--ink-faint)]">
+        <div className="wc-empty-inline m-4">
           La consolacion aparece cuando marques perdedores de primera ronda.
         </div>
       )}
@@ -1924,7 +2317,7 @@ function MatchCard({
           {schedule ? (
             <>
               {schedule.dayLabel} {schedule.time}
-              <span className="wc-match-court"> · Pista {schedule.court}</span>
+              <span className="wc-match-court"> / Pista {schedule.court}</span>
             </>
           ) : (
             <span className="text-[var(--ink-faint)]">Sin horario</span>
@@ -2101,6 +2494,10 @@ function ScheduleEditor({
     });
   }
 
+  function lockCurrent(scheduleKey: string) {
+    onUpdateManualSchedule(scheduleKey, selectedValue(scheduleKey));
+  }
+
   function saveAll() {
     Array.from(dirtyKeys).forEach(saveOne);
   }
@@ -2143,16 +2540,16 @@ function ScheduleEditor({
   }
 
   return (
-    <section className="wc-card wc-accent-top p-4 sm:p-5">
-      <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+    <section className="wc-pane">
+      <div className="wc-pane-head">
         <div>
-          <p className="wc-eyebrow">Calendario</p>
-          <h2 className="wc-title mt-0.5 text-xl">Horarios del cuadro</h2>
-          <p className="mt-1 text-sm font-medium text-[var(--ink-soft)]">
+          <p className="wc-kicker">Horarios</p>
+          <h2 className="wc-section-title">Bloqueos y recalculo</h2>
+          <p className="wc-pane-copy">
             Los horarios bloqueados se fuerzan y el resto se recalcula alrededor.
           </p>
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="wc-pane-actions">
           <button
             className="wc-btn wc-btn-primary wc-btn-sm"
             onClick={recalculateWithManual}
@@ -2175,7 +2572,7 @@ function ScheduleEditor({
         </div>
       </div>
 
-      <div className="grid gap-2.5">
+      <div className="wc-schedule-edit-list">
         {editableMatches.map(({ drawName, match, roundName }) => {
           const key = matchScheduleKey(categoryId, match);
           const manual = manualScheduleOverrides[key];
@@ -2189,21 +2586,21 @@ function ScheduleEditor({
 
           return (
             <article
-              className={`rounded-xl border p-3 ${
+              className={`wc-schedule-edit-row ${
                 schedule[key]?.conflict
-                  ? "border-[var(--amber-500)] bg-[var(--amber-50)]"
+                  ? "wc-schedule-edit-row-conflict"
                   : hasDraft
-                    ? "border-[var(--pitch-600)] bg-[var(--pitch-50)]"
-                    : "border-[var(--line)] bg-[var(--surface-2)]"
+                    ? "wc-schedule-edit-row-draft"
+                    : ""
               }`}
               key={key}
             >
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <p className="font-display text-xs font-semibold uppercase tracking-[0.14em] text-[var(--ink-faint)]">
-                    {drawName} · {roundName} · {match.id}
+                  <p className="wc-row-label">
+                    {drawName} / {roundName} / {match.id}
                   </p>
-                  <p className="mt-1 line-clamp-2 text-sm font-bold">
+                  <p className="wc-schedule-match-label">
                     {matchTeamsLabel(match)}
                   </p>
                 </div>
@@ -2220,7 +2617,7 @@ function ScheduleEditor({
                 </span>
               </div>
 
-              <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_1fr_84px_auto_auto]">
+              <div className="wc-schedule-edit-controls">
                 <select
                   className="wc-field h-9"
                   onChange={(event) =>
@@ -2269,9 +2666,13 @@ function ScheduleEditor({
                   className={`wc-btn wc-btn-sm ${
                     locked && !hasDraft ? "wc-btn-ghost" : "wc-btn-primary"
                   }`}
-                  disabled={!hasDraft && !locked}
+                  disabled={!hasDraft && !locked && !schedule[key]}
                   onClick={() =>
-                    locked && !hasDraft ? resetRow(key) : saveOne(key)
+                    locked && !hasDraft
+                      ? resetRow(key)
+                      : hasDraft
+                        ? saveOne(key)
+                        : lockCurrent(key)
                   }
                   type="button"
                 >
@@ -2280,7 +2681,7 @@ function ScheduleEditor({
                   ) : (
                     <LockKeyhole className="h-4 w-4" />
                   )}
-                  {locked && !hasDraft ? "Desbloquear" : "Bloquear"}
+                  {locked && !hasDraft ? "Soltar" : "Fijar"}
                 </button>
                 <button
                   className="wc-icon-btn h-9 w-9"
@@ -2319,21 +2720,19 @@ function PublicAdminPanel({
 }) {
   return (
     <div className="grid gap-5">
-      <section className="wc-card wc-accent-top p-4 sm:p-5">
-        <div className="flex items-start gap-3">
-          <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-[var(--pitch-900)] text-[var(--gold-300)]">
-            <Globe2 className="h-6 w-6" />
-          </span>
+      <section className="wc-pane">
+        <div className="wc-pane-head">
           <div>
-            <p className="wc-eyebrow">Salida publica</p>
-            <h2 className="wc-title mt-0.5 text-2xl">
-              Horarios y enlace del torneo
-            </h2>
-            <p className="mt-1 max-w-3xl text-sm font-medium text-[var(--ink-soft)]">
-              Esta es la vista preparada para jugadores y publico: fixture,
-              pistas, categorias y link para abrir en otra pestana.
+            <p className="wc-kicker">Salida publica</p>
+            <h2 className="wc-pane-title">Match centre listo para jugadores</h2>
+            <p className="wc-pane-copy">
+              Publica horarios, pistas, categorias y cuadros en una vista
+              preparada para consulta rapida.
             </p>
           </div>
+          <span className="wc-public-icon">
+            <Globe2 className="h-6 w-6" />
+          </span>
         </div>
       </section>
 
@@ -2366,11 +2765,11 @@ function PublishPanel({
   published: boolean;
 }) {
   return (
-    <section className="wc-card-flat p-4 sm:p-5">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+    <section className="wc-publish-panel">
+      <div className="min-w-0">
         <div>
           <div className="flex items-center gap-2">
-            <p className="wc-eyebrow">Publicacion</p>
+            <p className="wc-kicker">Publicacion</p>
             {published ? (
               <span className="wc-chip wc-chip-green">
                 <CheckCircle2 className="h-3.5 w-3.5" />
@@ -2378,15 +2777,16 @@ function PublishPanel({
               </span>
             ) : null}
           </div>
-          <h2 className="wc-title mt-0.5 text-xl">
+          <h2 className="wc-section-title mt-1">
             {published ? "Cuadro publico listo" : "Publicar cuadro"}
           </h2>
-          <p className="mt-1 text-sm font-medium text-[var(--ink-soft)]">
+          <p className="wc-pane-copy">
             Mientras usemos localStorage, el enlace publico funciona en este
             navegador. Para Vercel real necesitaremos base de datos.
           </p>
         </div>
-        <div className="flex flex-wrap gap-2">
+      </div>
+      <div className="wc-publish-actions">
           <button className="wc-btn wc-btn-dark" onClick={onPublish} type="button">
             <Share2 className="h-4 w-4" />
             {published ? "Actualizar publico" : "Publicar"}
@@ -2411,31 +2811,8 @@ function PublishPanel({
               Ver publico
             </a>
           ) : null}
-        </div>
       </div>
     </section>
-  );
-}
-
-function StatCard({
-  icon: Icon,
-  label,
-  value,
-}: {
-  icon: typeof Trophy;
-  label: string;
-  value: number | string;
-}) {
-  return (
-    <article className="wc-stat">
-      <div>
-        <p className="wc-stat-label">{label}</p>
-        <p className="wc-stat-value mt-1.5">{value}</p>
-      </div>
-      <span className="wc-stat-ico">
-        <Icon className="h-5 w-5" />
-      </span>
-    </article>
   );
 }
 
@@ -2469,7 +2846,7 @@ function Notice({
 
 function roundLabel(row: ScheduleSummaryRow) {
   return row.drawName === "Consolacion"
-    ? `Consol. · ${row.roundName}`
+    ? `Consol. / ${row.roundName}`
     : row.roundName;
 }
 
@@ -2495,7 +2872,7 @@ function ScheduleRow({ row }: { row: ScheduleSummaryRow }) {
   return (
     <tr>
       <td className="wc-sched-hora">{row.time}</td>
-      <td className="wc-sched-pista">{row.court ? `P${row.court}` : "—"}</td>
+      <td className="wc-sched-pista">{row.court ? `P${row.court}` : "-"}</td>
       <td>
         <span className="flex items-center gap-2">
           <span
@@ -2568,17 +2945,17 @@ function PublicSchedulePanel({ rows }: { rows: ScheduleSummaryRow[] }) {
   const dayGroups = groupRowsByDay(filtered);
 
   return (
-    <section className="flex flex-col gap-6">
-      <div className="flex flex-col gap-4">
-        <div className="flex flex-wrap items-end justify-between gap-3">
+    <section className="wc-public-schedule">
+      <div className="wc-public-schedule-head">
+        <div className="wc-public-schedule-title-row">
           <h2 className="wc-title text-2xl sm:text-3xl">Horarios del torneo</h2>
-          <span className="text-sm font-semibold text-[var(--ink-soft)]">
+          <span className="wc-public-schedule-count">
             {filtered.length} de {rows.length} partidos
           </span>
         </div>
 
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex flex-wrap gap-2">
+        <div className="wc-public-schedule-controls">
+          <div className="wc-public-filter-row">
             <button
               className={`wc-pill ${activeCategory === "all" ? "wc-pill-active" : ""}`}
               onClick={() => setActiveCategory("all")}
@@ -2604,7 +2981,7 @@ function PublicSchedulePanel({ rows }: { rows: ScheduleSummaryRow[] }) {
             ))}
           </div>
 
-          <div className="relative lg:w-96">
+          <div className="wc-public-search">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--ink-faint)]" />
             <label className="sr-only" htmlFor="public-schedule-search">
               Buscar horarios
@@ -2613,7 +2990,7 @@ function PublicSchedulePanel({ rows }: { rows: ScheduleSummaryRow[] }) {
               id="public-schedule-search"
               className="wc-field w-full pl-9 pr-11"
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="Jugador, pareja, categoria, pista, dia u hora"
+              placeholder="Buscar jugador, pista u hora"
               type="search"
               value={query}
             />
@@ -2636,7 +3013,7 @@ function PublicSchedulePanel({ rows }: { rows: ScheduleSummaryRow[] }) {
           <div className="flex flex-col gap-2.5" key={group.dayLabel}>
             <div className="wc-day-head">
               <h3 className="wc-day-title">{group.dayLabel}</h3>
-              <span className="text-xs font-semibold uppercase tracking-[0.1em] text-[var(--ink-faint)]">
+              <span className="text-xs font-semibold uppercase text-[var(--ink-faint)]">
                 {group.rows.length} partidos
               </span>
               <span className="wc-day-rule" />
@@ -2662,7 +3039,7 @@ function PublicSchedulePanel({ rows }: { rows: ScheduleSummaryRow[] }) {
           </div>
         ))
       ) : (
-        <div className="rounded-xl border border-dashed border-[var(--line-strong)] bg-[var(--surface-2)] p-6 text-sm font-semibold text-[var(--ink-faint)]">
+        <div className="wc-empty-inline p-6">
           {rows.length
             ? "No hay partidos que coincidan con el filtro."
             : "Horarios pendientes."}
@@ -2682,7 +3059,24 @@ export function TournamentPublicPage({ slug }: { slug: string }) {
   >("schedule");
 
   useEffect(() => {
-    const read = () => setTournament(readPublishedTournament(slug));
+    // `undefined` is a sentinel that can never equal a localStorage value, so
+    // the first poll after a slug change always applies (even when the new slug
+    // is unpublished and reads back as null).
+    let lastRaw: string | null | undefined;
+
+    const read = () => {
+      const raw =
+        typeof window === "undefined"
+          ? null
+          : window.localStorage.getItem(publicStorageKey(slug));
+
+      // Skip the state update (and the full re-render it triggers) when the
+      // published payload has not changed since the last poll.
+      if (raw === lastRaw) return;
+
+      lastRaw = raw;
+      setTournament(safeJsonParse<PublishedTournament>(raw));
+    };
 
     read();
     const interval = window.setInterval(read, 1500);
@@ -2732,12 +3126,12 @@ export function TournamentPublicPage({ slug }: { slug: string }) {
   if (!tournament) {
     return (
       <main className="wc-app grid min-h-screen place-items-center p-6">
-        <section className="wc-card wc-accent-top max-w-sm p-8 text-center">
-          <span className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-[var(--pitch-900)] text-[var(--gold-300)]">
+        <section className="wc-not-published">
+          <span className="rg-logo-mark mx-auto">
             <Trophy className="h-7 w-7" />
           </span>
-          <h1 className="wc-title mt-4 text-2xl">Cuadro no publicado</h1>
-          <p className="mt-2 text-sm font-medium text-[var(--ink-soft)]">
+          <h1>Cuadro no publicado</h1>
+          <p>
             Publicalo desde el panel de administracion.
           </p>
         </section>
@@ -2746,54 +3140,35 @@ export function TournamentPublicPage({ slug }: { slug: string }) {
   }
 
   return (
-    <main className="wc-app min-h-screen text-[var(--ink)]">
-      <header className="wc-hero-bar">
-        <div className="wc-bar">
-          <div className="flex items-center gap-3 sm:gap-4">
-            <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-white/10 text-[var(--gold-300)] ring-1 ring-white/15">
+    <main className="wc-app wc-public-app min-h-screen text-[var(--ink)]">
+      <header className="wc-topbar">
+        <div className="wc-topbar-inner">
+          <div className="wc-public-brand">
+            <span className="rg-logo-mark">
               <Trophy className="h-6 w-6" />
             </span>
-            <div>
-              <p className="font-display text-[0.68rem] font-semibold uppercase tracking-[0.3em] text-[var(--gold-300)]">
-                Match centre
-              </p>
-              <h1 className="font-display text-3xl font-bold uppercase leading-none sm:text-4xl">
+            <div className="min-w-0">
+              <p className="wc-kicker">Match centre</p>
+              <h1 className="wc-brand-title truncate">
                 {tournament.name}
               </h1>
             </div>
           </div>
-          <div className="grid grid-cols-3 overflow-hidden rounded-2xl border border-white/15 bg-white/10 text-center">
-            {[
-              { label: "Categorias", value: drawSets.length },
-              { label: "Partidos", value: schedule.total },
-              { label: "Sabado", value: schedule.saturdayCount },
-            ].map((item, index) => (
-              <div
-                className={`px-4 py-2.5 sm:px-6 ${index === 1 ? "border-x border-white/15" : ""}`}
-                key={item.label}
-              >
-                <p className="font-display text-2xl font-bold tabular leading-none">
-                  {item.value}
-                </p>
-                <p className="mt-1 font-display text-[0.58rem] font-semibold uppercase tracking-[0.16em] text-white/55">
-                  {item.label}
-                </p>
-              </div>
-            ))}
-          </div>
         </div>
       </header>
-      <div className="wc-container">
-
-        <section className="wc-card-flat p-2">
-          <div className="grid gap-2 sm:grid-cols-2">
+      <div
+        className={`wc-shell ${
+          activePublicView === "draws" ? "wc-shell-draws" : ""
+        }`}
+      >
+        <section className="wc-public-view-switch">
             {[
               { id: "schedule" as const, label: "Horarios" },
               { id: "draws" as const, label: "Cuadros" },
             ].map((tab) => (
               <button
-                className={`wc-pill w-full justify-center ${
-                  activePublicView === tab.id ? "wc-pill-active" : ""
+                className={`wc-public-view-tab ${
+                  activePublicView === tab.id ? "wc-public-view-tab-active" : ""
                 }`}
                 key={tab.id}
                 onClick={() => setActivePublicView(tab.id)}
@@ -2802,7 +3177,6 @@ export function TournamentPublicPage({ slug }: { slug: string }) {
                 {tab.label}
               </button>
             ))}
-          </div>
         </section>
 
         {activePublicView === "schedule" ? (
@@ -2811,8 +3185,8 @@ export function TournamentPublicPage({ slug }: { slug: string }) {
 
         {activePublicView === "draws" ? (
           <>
-            <section className="wc-card-flat p-2.5">
-              <div className="flex flex-wrap gap-2">
+            <section className="wc-category-strip">
+              <div className="wc-category-strip-inner">
                 {drawSets.map((drawSet) => (
                   <button
                     className={`wc-pill ${
@@ -2837,18 +3211,7 @@ export function TournamentPublicPage({ slug }: { slug: string }) {
             </section>
 
             {activeDrawSet ? (
-              <section className="wc-wide grid gap-5">
-                <div className="flex items-center gap-2.5">
-                  <span
-                    className="wc-crest"
-                    style={{
-                      backgroundColor: categoryCrestColor(activeDrawSet.categoryId),
-                    }}
-                  />
-                  <h2 className="wc-title text-2xl">
-                    {activeDrawSet.categoryName}
-                  </h2>
-                </div>
+              <section className="wc-bracket-field wc-public-draw-field">
                 <BracketView
                   categoryId={activeDrawSet.categoryId}
                   draw={activeDrawSet.mainDraw}

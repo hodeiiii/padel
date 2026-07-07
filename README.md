@@ -1,43 +1,39 @@
-# Padel
+# Padel Bracket
 
-Aplicación web para la **administración de torneos de pádel**, construida con Next.js. Incluye un panel de administración para gestionar el cuadro (bracket) y marcar quién avanza de ronda.
+Aplicacion Next.js para preparar cuadros y horarios de un torneo de padel a partir de un Excel.
 
-## Stack
+## Que hace
 
-- [Next.js 16](https://nextjs.org) (App Router)
-- React 19
-- Tailwind CSS 4
-- [lucide-react](https://lucide.dev) para iconos
-- [SheetJS (xlsx)](https://sheetjs.com) para importar/exportar datos en Excel
+- Importa el Excel de parejas, categorias y restricciones horarias.
+- Convierte restricciones libres en reglas editables: `SOLO PUEDE` y `NO PUEDE`.
+- Configura ventanas del torneo por dia y prioridad de calculo.
+- Genera cuadros principal y consolacion, horarios por pista y avisos de conflicto.
+- Permite bloquear cruces y horarios manuales para recalcular el resto.
+- Publica una vista publica con orden de juego y cuadros.
+
+La estetica toma como referencia la pagina de resultados/cuadros de Roland-Garros: interfaz clara, densa, con acento arcilla, verde institucional y brackets horizontales.
 
 ## Desarrollo
-
-Requisitos: Node.js 20+.
 
 ```bash
 npm install
 npm run dev
 ```
 
-Abre [http://localhost:3000](http://localhost:3000).
+Abre `http://localhost:3000`.
+
+En esta sesion lo he dejado corriendo en `http://localhost:3001` porque el
+puerto 3000 ya estaba ocupado.
+
+La clave del panel privado es la misma que en el proyecto base: `landerlander`.
 
 ## Scripts
 
-| Comando         | Descripción                          |
-| --------------- | ------------------------------------ |
-| `npm run dev`   | Servidor de desarrollo               |
-| `npm run build` | Build de producción                  |
-| `npm run start` | Sirve el build de producción         |
-| `npm run lint`  | Linter (ESLint)                      |
+- `npm run dev`: servidor de desarrollo.
+- `npm run build`: build de produccion.
+- `npm run start`: sirve la build.
+- `npm run lint`: ESLint.
 
-## Despliegue
+## Nota de persistencia
 
-Desplegado en [Vercel](https://vercel.com). Cada push a `main` genera un despliegue.
-
-### Variables de entorno
-
-Las variables se configuran en el panel de Vercel (Settings → Environment Variables). Para desarrollo local, copia `.env.example` a `.env.local` y rellena los valores.
-
-| Variable       | Descripción                                    |
-| -------------- | ---------------------------------------------- |
-| `DATABASE_URL` | Cadena de conexión de la base de datos (Neon). |
+Ahora mismo el panel guarda en `localStorage`, igual que el proyecto base. Para publicar enlaces persistentes entre dispositivos haria falta conectar una base de datos.
