@@ -243,6 +243,9 @@ function TournamentAdminClient() {
   const [loadingExcel, setLoadingExcel] = useState(false);
   const [importError, setImportError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [remoteStatus, setRemoteStatus] = useState<
+    "idle" | "saving" | "ok" | "error"
+  >("idle");
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -638,7 +641,7 @@ function TournamentAdminClient() {
     });
   }
 
-  function publishTournament() {
+  async function publishTournament() {
     const slug = publishedSlug || slugFromName("torneo padel");
     const tournament: PublishedTournament = {
       categories,
@@ -650,12 +653,29 @@ function TournamentAdminClient() {
       scheduleConfig,
       slug,
     };
+    const payload = JSON.stringify(tournament);
 
-    window.localStorage.setItem(
-      publicStorageKey(slug),
-      JSON.stringify(tournament),
-    );
+    // Immediate local copy (works in this browser even before the store is set).
+    window.localStorage.setItem(publicStorageKey(slug), payload);
     setPublishedSlug(slug);
+
+    // Persist to the shared store so the public link works on every device and
+    // survives closing the browser.
+    setRemoteStatus("saving");
+    try {
+      const response = await fetch(`/api/public/${slug}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-admin-password": adminPassword,
+        },
+        body: payload,
+      });
+
+      setRemoteStatus(response.ok ? "ok" : "error");
+    } catch {
+      setRemoteStatus("error");
+    }
   }
 
   async function copyPublicLink() {
@@ -819,6 +839,7 @@ function TournamentAdminClient() {
                     publicPath={publicPath}
                     publicUrl={publicUrl}
                     published={Boolean(publishedSlug)}
+                    remoteStatus={remoteStatus}
                     rows={summaryRows}
                   />
                 ) : null}
@@ -2708,6 +2729,7 @@ function PublicAdminPanel({
   publicPath,
   publicUrl,
   published,
+  remoteStatus,
   rows,
 }: {
   copied: boolean;
@@ -2716,6 +2738,7 @@ function PublicAdminPanel({
   publicPath: string;
   publicUrl: string;
   published: boolean;
+  remoteStatus: "idle" | "saving" | "ok" | "error";
   rows: ScheduleSummaryRow[];
 }) {
   return (
@@ -2743,6 +2766,7 @@ function PublicAdminPanel({
         publicPath={publicPath}
         publicUrl={publicUrl}
         published={published}
+        remoteStatus={remoteStatus}
       />
       <PublicSchedulePanel rows={rows} />
     </div>
@@ -2756,6 +2780,7 @@ function PublishPanel({
   publicPath,
   publicUrl,
   published,
+  remoteStatus,
 }: {
   copied: boolean;
   onCopy: () => void;
@@ -2763,6 +2788,7 @@ function PublishPanel({
   publicPath: string;
   publicUrl: string;
   published: boolean;
+  remoteStatus: "idle" | "saving" | "ok" | "error";
 }) {
   return (
     <section className="wc-publish-panel">
@@ -2781,9 +2807,23 @@ function PublishPanel({
             {published ? "Cuadro publico listo" : "Publicar cuadro"}
           </h2>
           <p className="wc-pane-copy">
-            Mientras usemos localStorage, el enlace publico funciona en este
-            navegador. Para Vercel real necesitaremos base de datos.
+            Al publicar se guarda en la base de datos compartida, asi el enlace
+            funciona en cualquier dispositivo y no se borra. Si aun no hay base
+            de datos configurada, el enlace solo funciona en este navegador.
           </p>
+          {remoteStatus === "saving" ? (
+            <p className="mt-2 text-sm font-bold text-[var(--ink-soft)]">
+              Guardando en la base de datos...
+            </p>
+          ) : remoteStatus === "ok" ? (
+            <p className="mt-2 text-sm font-bold text-[var(--pitch-700)]">
+              Guardado en la base de datos: visible en cualquier dispositivo.
+            </p>
+          ) : remoteStatus === "error" ? (
+            <p className="mt-2 text-sm font-bold text-[var(--coral-600)]">
+              Guardado solo en este navegador (base de datos no disponible).
+            </p>
+          ) : null}
         </div>
       </div>
       <div className="wc-publish-actions">
@@ -3059,29 +3099,60 @@ export function TournamentPublicPage({ slug }: { slug: string }) {
   >("schedule");
 
   useEffect(() => {
-    // `undefined` is a sentinel that can never equal a localStorage value, so
-    // the first poll after a slug change always applies (even when the new slug
-    // is unpublished and reads back as null).
-    let lastRaw: string | null | undefined;
+    // `undefined` is a sentinel that can never equal a real payload, so the
+    // first poll always applies (even when the tournament is unpublished and
+    // reads back as null).
+    let lastSignature: string | null | undefined;
+    let cancelled = false;
 
-    const read = () => {
-      const raw =
-        typeof window === "undefined"
-          ? null
-          : window.localStorage.getItem(publicStorageKey(slug));
+    const localRaw = () =>
+      typeof window === "undefined"
+        ? null
+        : window.localStorage.getItem(publicStorageKey(slug));
 
+    const apply = (
+      signature: string | null,
+      next: PublishedTournament | null,
+    ) => {
       // Skip the state update (and the full re-render it triggers) when the
-      // published payload has not changed since the last poll.
-      if (raw === lastRaw) return;
+      // payload has not changed since the last poll.
+      if (cancelled || signature === lastSignature) return;
 
-      lastRaw = raw;
-      setTournament(safeJsonParse<PublishedTournament>(raw));
+      lastSignature = signature;
+      setTournament(next);
+    };
+
+    const read = async () => {
+      try {
+        const response = await fetch(`/api/public/${slug}`, {
+          cache: "no-store",
+        });
+        const bodyText = await response.text();
+        const data = JSON.parse(bodyText) as {
+          configured: boolean;
+          tournament: PublishedTournament | null;
+        };
+
+        if (data.configured) {
+          // The shared store is the source of truth once it is set up.
+          apply(bodyText, data.tournament);
+          return;
+        }
+      } catch {
+        // Network/API problem: fall back to this browser's local copy below.
+      }
+
+      const raw = localRaw();
+      apply(raw, safeJsonParse<PublishedTournament>(raw));
     };
 
     read();
-    const interval = window.setInterval(read, 1500);
+    const interval = window.setInterval(read, 5000);
 
-    return () => window.clearInterval(interval);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
   }, [slug]);
 
   const drawSets = useMemo(
